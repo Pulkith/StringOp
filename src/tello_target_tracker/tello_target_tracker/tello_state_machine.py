@@ -8,6 +8,10 @@ from std_msgs.msg import String, Bool
 from geometry_msgs.msg import Point, Twist, Vector3
 from tello_interfaces.msg import TargetInfo, DroneStatus
 
+# Add this import
+from std_srvs.srv import SetBool
+
+
 # Import the Tello library
 from tello_target_tracker.DJITelloPy.djitellopy import Tello
 
@@ -72,18 +76,18 @@ class TelloStateMachine(Node):
             10
         )
         
-        # Create service for starting and stopping missions
+        
         self.start_service = self.create_service(
-            Bool, 
+            SetBool, 
             f'/drone_{self.drone_id}/start_mission', 
             self.start_mission_callback
         )
         self.abort_service = self.create_service(
-            Bool, 
+            SetBool, 
             f'/drone_{self.drone_id}/abort_mission', 
             self.abort_mission_callback
         )
-        
+                
         # Create timers for state machine execution and status updates
         self.timer = self.create_timer(0.1, self.state_machine_callback)  # 10Hz
         self.status_timer = self.create_timer(1.0, self.publish_status)  # 1Hz
@@ -91,16 +95,28 @@ class TelloStateMachine(Node):
         self.get_logger().info(f'Tello State Machine initialized for drone {self.drone_id}')
     
     def connect_to_drone(self):
-        """Connect to the Tello drone and initialize it"""
-        try:
-            self.tello.connect()
-            battery = self.tello.get_battery()
-            self.get_logger().info(f"Connected to Tello drone. Battery: {battery}%")
-            if battery < 20:
-                self.get_logger().warn(f"Low battery: {battery}%! Charge before extended flight.")
-        except Exception as e:
-            self.get_logger().error(f"Failed to connect to Tello drone: {str(e)}")
-            raise
+        """Connect to the Tello drone and initialize it with retry logic"""
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                self.get_logger().info(f"Attempting to connect to Tello drone (attempt {retry_count+1}/{max_retries})...")
+                self.tello.connect()
+                battery = self.tello.get_battery()
+                self.get_logger().info(f"Connected to Tello drone. Battery: {battery}%")
+                if battery < 20:
+                    self.get_logger().warn(f"Low battery: {battery}%! Charge before extended flight.")
+                return True
+            except Exception as e:
+                retry_count += 1
+                self.get_logger().error(f"Failed to connect to Tello drone: {str(e)}")
+                if retry_count < max_retries:
+                    self.get_logger().info(f"Retrying in 2 seconds...")
+                    time.sleep(2)
+                else:
+                    self.get_logger().error("Maximum retries exceeded. Check if drone is powered on and Wi-Fi is connected.")
+                    return False
     
     def target_detection_callback(self, msg):
         """Process target detection from perception module"""
@@ -146,22 +162,26 @@ class TelloStateMachine(Node):
         """Service callback to start the mission"""
         if self.current_state == DroneState.IDLE:
             self.start_mission()
-            response.data = True
+            response.success = True
+            response.message = "Mission started"
         else:
             self.get_logger().warn("Cannot start mission: drone not in IDLE state")
-            response.data = False
+            response.success = False
+            response.message = "Drone not in IDLE state"
         return response
-    
+
     def abort_mission_callback(self, request, response):
         """Service callback to abort the mission"""
         if self.current_state != DroneState.IDLE:
             self.abort_mission()
-            response.data = True
+            response.success = True
+            response.message = "Mission aborted"
         else:
             self.get_logger().warn("Cannot abort mission: drone already in IDLE state")
-            response.data = False
+            response.success = False
+            response.message = "Drone already in IDLE state"
         return response
-    
+        
     def publish_status(self):
         """Publish drone status information"""
         try:
@@ -206,9 +226,16 @@ class TelloStateMachine(Node):
         # Rotate in place to look for targets
         self.tello.send_rc_control(0, 0, 0, 30 * self.search_direction)
         
-        # Toggle search direction periodically
-        if int(time.time()) % 10 == 0:
+        # Toggle search direction periodically using a proper timer
+        current_time = time.time()
+        if not hasattr(self, 'last_direction_change'):
+            self.last_direction_change = current_time
+        
+        # Change direction every 10 seconds
+        if current_time - self.last_direction_change >= 10.0:
             self.search_direction *= -1  # Reverse direction
+            self.last_direction_change = current_time
+            self.get_logger().info(f"Changing search direction to {self.search_direction}")
     
     def execute_tracking(self):
         """Execute tracking behavior based on target position"""
@@ -270,12 +297,24 @@ class TelloStateMachine(Node):
                 self.change_state(DroneState.IDLE)
             
         elif self.current_state == DroneState.SEARCHING:
-            # Search for targets if none assigned
-            if self.assigned_target_id is None:
-                self.execute_search_pattern()
-            else:
-                # If we have an assignment, transition to tracking
+
+            # Check if any targets are detected (without waiting for assignment)
+            if self.targets:
+                # Simply take the first detected target
+                self.assigned_target_id = list(self.targets.keys())[0]
+                self.get_logger().info(f"Target {self.assigned_target_id} detected, tracking immediately")
                 self.change_state(DroneState.TRACKING)
+            else:
+                # Continue searching if no targets found
+                self.execute_search_pattern()
+
+
+            # Search for targets if none assigned
+            # if self.assigned_target_id is None:
+            #     self.execute_search_pattern()
+            # else:
+            #     # If we have an assignment, transition to tracking
+            #     self.change_state(DroneState.TRACKING)
         
         elif self.current_state == DroneState.WAITING_FOR_ASSIGNMENT:
             # Wait for target assignment from prioritization module
