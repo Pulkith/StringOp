@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional
-import math
+import numpy
 
 @dataclass
 class GlobalPose:
@@ -36,11 +36,9 @@ def score(a: ObjectAttributes, b: ObjectAttributes) -> float:
     color_diff = ((a.color[0] - b.color[0]) ** 2 + (a.color[1] - b.color[1]) ** 2 + (a.color[2] - b.color[2]) ** 2) ** 0.5
     return 0.1*size_diff + 0.9*color_diff
 
-def to_vector(object_pose: LocalPose, object_attributes: ObjectAttributes) -> GlobalPose:
-    x = object_pose.x - cx
-    y = object_pose.y - cy
-    z = object_attributes.size_x * f
-    return GlobalPose(x, y, z)
+def dist(a: GlobalPose, b: GlobalPose) -> float:
+    # Calculate the Euclidean distance between two poses
+    return ((a.x - b.x) ** 2 + (a.y - b.y) ** 2) ** 0.5
 
 def update_vector_low_pass(prev_pose: GlobalPose, new_pose: GlobalPose, alpha=0.5) -> GlobalPose:
     # alpha = 1.0 for no filtering
@@ -67,7 +65,7 @@ class GlobalState:
     def add_or_update_object(self, object_pose: GlobalPose, object_attributes: ObjectAttributes) -> None:
         is_new_object = True
         for index, existing_object in enumerate(self.objects):
-            if score(object_attributes, existing_object[1]) < 0.5:
+            if score(object_attributes, existing_object[1]) < 0.5 and dist(object_pose, existing_object[0]) < 0.5:
                 print("Updating existing object")
                 existing_object_pose = update_vector_low_pass(existing_object[0], object_pose)
                 print(f"Existing object pose: {existing_object_pose}")
@@ -83,11 +81,11 @@ class GlobalState:
         drone_pose = self.drones[drone_id]
         # Update object poses with low pass filter (ADMM like approach)
         for drone_object in objects:
-            relative_object_vector = to_vector(drone_object[0], drone_object[1])
+            relative_object_vector = drone_object[0]
             global_object_vector = GlobalPose(
-                x=drone_pose.x + relative_object_vector.x * math.cos(drone_pose.yaw) - relative_object_vector.z * math.sin(drone_pose.yaw),
-                z=drone_pose.z + relative_object_vector.x * math.sin(drone_pose.yaw) + relative_object_vector.z * math.cos(drone_pose.yaw),
-                y=drone_pose.y + relative_object_vector.y,
+                x=drone_pose.x + relative_object_vector.x * numpy.cos(drone_pose.yaw) - relative_object_vector.y * numpy.sin(drone_pose.yaw),
+                y=drone_pose.y + relative_object_vector.x * numpy.sin(drone_pose.yaw) + relative_object_vector.y * numpy.cos(drone_pose.yaw),
+                z=drone_pose.z + relative_object_vector.z,
             )
 
             print(f"Global object vector: {global_object_vector}")

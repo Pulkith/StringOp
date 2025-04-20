@@ -51,10 +51,10 @@ class PoseEstimation:
             # y is the height of the drone
             # z is the depth direction
 
-            self.x += vy * self.dt
-            self.z += vx * self.dt
-            #self.y = self.tello.get_height()
-            self.y += vz * self.dt
+            self.x += vx * self.dt
+            self.y += vy * self.dt
+            self.z = self.tello.get_height()
+            #self.z += vz * self.dt
             self.yaw = self.tello.get_yaw()
 
             #print(f"Pose: x={self.x}, y={self.y}, z={self.z}, yaw={self.yaw}")
