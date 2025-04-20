@@ -3,11 +3,11 @@ import time
 import pandas as pd
 
 class PoseEstimation:
-    def __init__(self, tello, x_init = 0):
+    def __init__(self, tello, y_init = 0):
         # All drones are aligned at the beginning with an offset in x
         self.tello = tello
-        self.x = x_init
-        self.y = 0
+        self.x = 0
+        self.y = y_init
         self.z = 0
         self.yaw = 0
 

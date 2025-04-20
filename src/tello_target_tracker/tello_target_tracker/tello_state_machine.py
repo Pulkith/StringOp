@@ -16,9 +16,12 @@ from std_srvs.srv import SetBool
 
 # Import the ROS visualization module
 from tello_target_tracker.ros_visualization import RosVisualizer, draw_tracking_status
+from tello_target_tracker.pose_estimation import PoseEstimation
 
 # Import the Tello library
 from tello_target_tracker.DJITelloPy.djitellopy import Tello
+
+from tello_interfaces.msg import DroneStatus, LocalPose, Object
 
 class DroneState(enum.Enum):
     IDLE = 0
@@ -67,6 +70,9 @@ class TelloStateMachine(Node):
             device=None                        # Auto-select device (CUDA, MPS, or CPU)
         )
         
+        self.pose_estimation = PoseEstimation(self.tello, y_init=0)
+        self.position = {"x": 0, "y": 0, "z": 0}  # Estimated position (starting at 0, 0, 0)
+
         # Target acquisition parameters
         self.potential_targets = {}  # {target_id: persistence_count}
         self.min_detections_for_tracking = 3  # Primary threshold for confirmed tracking
@@ -78,7 +84,7 @@ class TelloStateMachine(Node):
         self.connect_to_drone()
         
         # Create ROS publishers
-        self.state_pub = self.create_publisher(
+        self.candidates_pub = self.create_publisher(
             DroneStatus, 
             f'/drone_{self.drone_id}/status', 
             10
@@ -110,7 +116,6 @@ class TelloStateMachine(Node):
                 
         # Create timers for state machine execution and status updates
         self.timer = self.create_timer(0.1, self.state_machine_callback)  # 10Hz
-        self.status_timer = self.create_timer(1.0, self.publish_status)  # 1Hz
         
         self.get_logger().info(f'Tello State Machine initialized for drone {self.drone_id}')
         # set logger to debug
@@ -225,27 +230,6 @@ class TelloStateMachine(Node):
             response.success = False
             response.message = "Drone already in IDLE state"
         return response
-        
-    def publish_status(self):
-        """Publish drone status information"""
-        try:
-            status_msg = DroneStatus()
-            status_msg.drone_id = self.drone_id
-            status_msg.state = self.current_state.name
-            status_msg.battery = self.tello.get_battery()
-            status_msg.target_id = -1 if self.assigned_target_id is None else self.assigned_target_id
-            status_msg.height = float(self.tello.get_height()) / 100.0  # Convert cm to meters
-            
-            # Get velocity information
-            vel = Vector3()
-            vel.x = float(self.tello.get_speed_x()) / 100.0  # Convert to m/s
-            vel.y = float(self.tello.get_speed_y()) / 100.0
-            vel.z = float(self.tello.get_speed_z()) / 100.0
-            status_msg.velocity = vel
-            
-            self.state_pub.publish(status_msg)
-        except Exception as e:
-            self.get_logger().error(f"Error publishing status: {str(e)}")
     
     def change_state(self, new_state):
         """Change the current state with logging"""
@@ -504,6 +488,11 @@ class TelloStateMachine(Node):
 
     def state_machine_callback(self):
         """Main state machine execution loop"""
+
+        x,y,z,yaw = self.pose_estimation.get_state()
+        self.position = {"x": x, "y": y, "z": z}
+
+
         # Try to get camera frame for states that need it
         if self.current_state in [DroneState.SEARCHING, DroneState.TRACKING]:
             # Make sure camera is initialized
@@ -660,11 +649,11 @@ class TelloStateMachine(Node):
             # Check if we've met the primary persistence threshold for any target
             max_tid = self._get_highest_persistence_target()
             if max_tid is not None and self.potential_targets[max_tid] >= self.min_detections_for_tracking:
-                self.assigned_target_id = max_tid
+                # self.assigned_target_id = max_tid
                 self.target_last_seen = current_time
                 self.get_logger().info(f"Target {max_tid} confirmed with {self.potential_targets[max_tid]} detections, transitioning to TRACKING")
                 # Force state change to tracking
-                self.change_state(DroneState.TRACKING)
+                # self.change_state(DroneState.TRACKING)
                 
                 # Optionally, report all candidates that meet secondary threshold
                 candidates = self._get_viable_candidates()
@@ -673,6 +662,8 @@ class TelloStateMachine(Node):
                     self.get_logger().info(f"Viable candidates: {candidate_str}")
                     # Here you would publish a message with these candidates
                     self.publish_candidate_targets(candidates)
+                    # change state to WAITING_FOR_ASSIGNMENT
+                    self.change_state(DroneState.WAITING_FOR_ASSIGNMENT)
 
     def _handle_similar_targets(self, current_tid):
         """
@@ -767,6 +758,72 @@ class TelloStateMachine(Node):
                 if tid != self.assigned_target_id:  # Keep assigned target longer
                     del self.targets[tid]
 
+    def publish_candidate_targets(self, candidates=None):
+        """
+        Publish information about tracked candidate targets.
+        
+        Args:
+            candidates: Optional list of (tid, count) tuples for candidates to publish.
+                    If None, will use all candidates meeting the secondary threshold.
+        """
+        try:
+            # If no candidates provided, get all viable candidates
+            if candidates is None:
+                candidates = self._get_viable_candidates()
+                
+            if not candidates:
+                self.get_logger().debug("No viable candidates to publish")
+                return
+                
+            # Create the DroneStatus message
+            status_msg = DroneStatus()
+            status_msg.drone_id = self.drone_id
+            
+            # Set drone pose (using estimated position)
+            pose = DroneState()
+            pose.x = float(self.position["x"])
+            pose.y = float(self.position["y"])
+            pose.z = float(self.tello.get_height()) / 100.0  # Convert cm to meters
+
+            # Get yaw from tello if available, otherwise use 0
+            try:
+                pose.yaw = float(self.tello.get_yaw())
+            except:
+                pose.yaw = 0.0
+            status_msg.pose = pose
+            
+            # Add objects (tracked targets)
+            objects = []
+            for tid, count in candidates:
+                if tid not in self.targets:
+                    continue
+                    
+                target = self.targets[tid]
+                obj = Object()
+                obj.object_id = tid
+                
+                obj.r = 0.0
+                obj.g = 0.0
+                obj.b = 0.0  
+
+                # Set distance and angle
+                obj.distance = float(target['distance']) / 100.0  # Convert cm to meters
+                obj.angle = float(target['heading'])  # Already in radians
+                
+                objects.append(obj)
+                
+            status_msg.objects = objects
+                
+                
+            # Publish the message
+            self.candidates_pub.publish(status_msg)
+            self.get_logger().info(f"Published {len(objects)} candidate targets")
+            
+        except Exception as e:
+            self.get_logger().error(f"Error publishing candidate targets: {str(e)}")
+            import traceback
+            self.get_logger().error(traceback.format_exc())
+
     def start_mission(self):
         if self.current_state == DroneState.IDLE:
             self.get_logger().info("Starting mission")
@@ -814,18 +871,6 @@ class TelloStateMachine(Node):
             self.tello.end()
         except Exception:
             self.get_logger().error("Failed to properly end Tello connection")
-
-    def get_position(self):
-        """Get the current position of the drone"""
-        try:
-            if all(v is not None for v in self.velocity.values()):
-                self.position["x"] += self.velocity["x"] * 0.1
-                self.position["y"] += self.velocity["y"] * 0.1
-                self.position["z"] = self.tello.get_height()
-                self.logger().info(f"Current position: {self.position}")
-        except Exception as e:
-            self.get_logger().error(f"Error getting position: {str(e)}")
-            return None
 
 def main(args=None):
     rclpy.init(args=args)

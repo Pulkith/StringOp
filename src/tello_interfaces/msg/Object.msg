@@ -1,4 +1,4 @@
-# DroneState.msg
+# Object.msg
 # Status information for a Tello drone
 
 int32 object_id

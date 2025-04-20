@@ -3,4 +3,4 @@
 
 int32 drone_id
 LocalPose pose
-List[Object] objects
+Object[] objects 

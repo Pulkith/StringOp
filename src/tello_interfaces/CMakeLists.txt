@@ -18,8 +18,10 @@ find_package(std_msgs REQUIRED)
 
 # Generate interfaces
 rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/Object.msg"
   "msg/DroneStatus.msg"
   "msg/TargetInfo.msg"
+  "msg/LocalPose.msg"
   DEPENDENCIES geometry_msgs std_msgs
 )
 
