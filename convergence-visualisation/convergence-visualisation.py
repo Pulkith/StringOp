@@ -11,7 +11,52 @@ from shapely.ops import unary_union, split
 from matplotlib import cm
 from matplotlib.colors import Normalize
 import uuid
+from mpl_toolkits.mplot3d import Axes3D
+import random
 
+# --- Entities ---
+class Drone:
+    def __init__(self, position):
+        self.position = np.array(position)
+        self.id = str(uuid.uuid4())
+        self.target = None
+        self.region_polygon = None
+        self.center_point = None
+        self.targets_in_region = []
+        self.alive = True
+        self.death_prob = random.uniform(0.00, 0.03)  # Probability of drone being 'killed' each step
+
+class Quadcopter(Drone):
+    def __init__(self, position):
+        super().__init__(position)
+
+    def move_towards(self, target, step_size):
+        direction = target - self.position
+        norm = np.linalg.norm(direction)
+        if norm > 0:
+            self.position += (direction / norm) * min(step_size, norm)
+
+class FixedWing(Drone):
+    def __init__(self, position, heading):
+        super().__init__(position)
+        self.heading = heading
+
+class PointOfInterest:
+    def __init__(self, position, weight=1.0):
+        self.position = np.array(position)
+        self.id = str(uuid.uuid4())
+        self.weight = weight
+
+class AreaOfInterest:
+    def __init__(self, polygon_coords, weight=1.0):
+        # polygon_coords: list of (x,y) tuples
+        self.polygon = Polygon(polygon_coords)
+        self.id = str(uuid.uuid4())
+        self.weight = weight
+
+
+
+# --- Voronoi Utilities ---
 def clipped_voronoi_polygons_2d(vor, bounds):
     from shapely.geometry import LineString
 
@@ -49,39 +94,9 @@ def clipped_voronoi_polygons_2d(vor, bounds):
         regions.append(region)
     return regions
 
-# --- Entities ---
-class Drone:
-    def __init__(self, position):
-        self.position = np.array(position)
-        self.id = str(uuid.uuid4())
-        self.target = None
-        self.region_polygon = None
-        self.center_point = None
-        self.targets_in_region = []
-
-class Quadcopter(Drone):
-    def __init__(self, position):
-        super().__init__(position)
-
-    def move_towards(self, target, step_size):
-        direction = target - self.position
-        norm = np.linalg.norm(direction)
-        if norm > 0:
-            self.position += (direction / norm) * min(step_size, norm)
-
-class FixedWing(Drone):
-    def __init__(self, position, heading):
-        super().__init__(position)
-        self.heading = heading
-
-class PointOfInterest:
-    def __init__(self, position, weight=1.0):
-        self.position = np.array(position)
-        self.id = str(uuid.uuid4())
-        self.weight = weight
 
 # --- Visualization ---
-def draw_scene(ax, drones, pois, bounds,
+def draw_scene(ax, drones, pois, aois, bounds,
                assignments=None,
                show_voronoi=False,
                use_custom_voronoi=False):
@@ -99,10 +114,10 @@ def draw_scene(ax, drones, pois, bounds,
     norm_poi = Normalize(vmin=1, vmax=10)
     cmap_poi = cm.Reds
 
-    # Draw clipped Voronoi polygons
+    # Draw clipped Voronoi polygons for alive drones only
     patches = []
     for drone in drones:
-        if isinstance(drone, Quadcopter) and drone.region_polygon is not None:
+        if isinstance(drone, Quadcopter) and drone.alive and drone.region_polygon is not None:
             coords = np.array(drone.region_polygon.exterior.coords)
             patch = MplPolygon(coords, closed=True)
             patches.append(patch)
@@ -115,38 +130,44 @@ def draw_scene(ax, drones, pois, bounds,
             alpha=0.2
         ))
 
+    # Draw areas of interest outlines
+    for area in aois:
+        coords = np.array(area.polygon.exterior.coords)
+        ax.plot(coords[:, 0], coords[:, 1], color='magenta', linestyle='--', linewidth=1)
+
     # Draw movement & indicator lines
     for drone in drones:
-        if isinstance(drone, Quadcopter):
-            # if no target, fly to center_point (orange star)
-            start = drone.target if drone.target is not None else drone.center_point
-            if start is not None:
+        if isinstance(drone, Quadcopter) and drone.alive:
+            # Draw line from drone to its target (if it has one)
+            if drone.target is not None:
                 ax.plot(
-                    [drone.position[0], start[0]],
-                    [drone.position[1], start[1]],
-                    color='blue', linewidth=1.5
+                    [drone.position[0], drone.target[0]],
+                    [drone.position[1], drone.target[1]],
+                    color='blue', linewidth=1.5, label='Target Line'
                 )
-            # if multiple POIs in region, dashed grey from target (green star) to each
+            # Draw dashed lines from the target to each POI in the region
             if drone.target is not None and len(drone.targets_in_region) > 1:
                 for poi_pos in drone.targets_in_region:
                     ax.plot(
                         [drone.target[0], poi_pos[0]],
                         [drone.target[1], poi_pos[1]],
-                        linestyle='--', color='gray', linewidth=1
+                        linestyle='--', color='gray', linewidth=1, label='POI Link'
                     )
 
     # Draw drones, centers, targets, POIs
     scale = min(bounds) / 20
     for drone in drones:
         if isinstance(drone, Quadcopter):
-            ax.scatter(*drone.position, marker='x', color='black', s=100 * scale)
-            if drone.center_point is not None:
-                ax.scatter(*drone.center_point, marker='*', color='orange', s=60)
-            if drone.target is not None:
-                ax.scatter(*drone.target, marker='*', color='green', s=100)
-        else:  # FixedWing
-            triangle = create_triangle_marker(drone.position, drone.heading, size=scale)
-            ax.plot(*triangle, color='black')
+            if drone.alive:
+                # Draw alive drones
+                ax.scatter(*drone.position, marker='x', color='black', s=100 * scale)
+                if drone.center_point is not None:
+                    ax.scatter(*drone.center_point, marker='o', color='orange', s=1, alpha=0.5)
+                if drone.target is not None:
+                    ax.scatter(*drone.target, marker='*', color='green', s=100)
+            else:
+                # Draw dead drones with skull marker
+                ax.scatter(*drone.position, marker='$\u2620$', color='red', s=150 * scale)
 
     for poi in pois:
         color = cmap_poi(norm_poi(poi.weight))
@@ -156,17 +177,21 @@ def draw_scene(ax, drones, pois, bounds,
     drone_handle      = mlines.Line2D([], [], color='black', marker='x', linestyle='None', markersize=8, label='Quadcopter')
     poi_handle        = mlines.Line2D([], [], color='red',   marker='o', linestyle='None', markersize=6, label='POI')
     target_handle     = mlines.Line2D([], [], color='green', marker='*', linestyle='None', markersize=10, label='Target')
-    center_handle     = mlines.Line2D([], [], color='orange',marker='*', linestyle='None', markersize=8, label='Region Center')
+    # center_handle     = mlines.Line2D([], [], color='orange',marker='o', linestyle='None', markersize=8, label='Region Center', alpha=0.5)
     goal_line_handle  = mlines.Line2D([], [], color='blue',  linewidth=1.5,           label='Goal Line')
     link_line_handle  = mlines.Line2D([], [], color='gray',  linestyle='--', linewidth=1, label='POI Links')
+    area_handle      = mlines.Line2D([], [], color='magenta', linestyle='--', linewidth=1, label='Area of Interest')
+    skull_handle = mlines.Line2D([], [], color='none', marker='$\u2620$',linestyle='None',markersize=12,label='Dead Drone')
     ax.legend(
         handles=[
             drone_handle,
             poi_handle,
             target_handle,
-            center_handle,
+            area_handle,
+            # center_handle,
             goal_line_handle,
-            link_line_handle
+            link_line_handle,
+            skull_handle
         ],
         loc='upper right'
     )
@@ -174,14 +199,90 @@ def draw_scene(ax, drones, pois, bounds,
     ax.set_title("Drones Moving to POI Region Centers")
 
 # --- Drawing Utilities ---
-def draw_static(drones, pois, bounds, filename, assignments=None):
+def draw_static(drones, pois, aois, bounds, filename, assignments=None):
     fig, ax = plt.subplots(figsize=(16, 9))
     ax.set_xlim(0, bounds[0])
     ax.set_ylim(0, bounds[1])
-    draw_scene(ax, drones, pois, bounds, assignments, show_voronoi=True, use_custom_voronoi=False)
+    draw_scene(ax, drones, pois, aois, bounds, assignments, show_voronoi=True, use_custom_voronoi=False)
     ax.set_title("Initial Configuration of Drones and POIs")
     plt.tight_layout()
     plt.savefig(filename, dpi=300)
+    plt.close()
+
+def draw_priority_surface(drones, pois, aois, bounds, filename, grid_res=100, sigma=None):
+    """
+    Draw a 3D surface of POI priority weights as Gaussian blobs,
+    overlaid on the 2D map at z=0.
+    """
+    if sigma is None:
+        sigma = min(bounds) / 10.0
+
+    # Create grid
+    x = np.linspace(0, bounds[0], grid_res)
+    y = np.linspace(0, bounds[1], grid_res)
+    X, Y = np.meshgrid(x, y)
+    Z = np.zeros_like(X)
+
+    # Accumulate Gaussian contributions
+    for poi in pois:
+        xi, yi = poi.position
+        w = poi.weight
+        Z += w * np.exp(-((X - xi) ** 2 + (Y - yi) ** 2) / (2 * sigma ** 2))
+
+    # include area contributions via their centroids
+    for area in aois:
+        xi, yi = area.polygon.centroid.coords[0]
+        w = area.weight
+        Z += w * np.exp(-((X - xi) ** 2 + (Y - yi) ** 2) / (2 * sigma ** 2))
+
+    # Create 3D figure
+    fig = plt.figure(figsize=(16, 9))
+    ax = fig.add_subplot(111, projection='3d')
+
+    # Draw 2D map underneath at z=0
+    # map border
+    rect_x, rect_y = create_rectangle_marker(bounds)
+    ax.plot(rect_x, rect_y, zs=0, zdir='z', color='black', linewidth=2)
+
+    # Voronoi regions
+    for drone in drones:
+        if drone.region_polygon is not None:
+            coords = np.array(drone.region_polygon.exterior.coords)
+            ax.plot(coords[:,0], coords[:,1], zs=0, zdir='z',
+                    color='blue', alpha=0.3)
+
+    # Drones as black 'x'
+    for drone in drones:
+        ax.scatter(drone.position[0], drone.position[1], 0,
+                   marker='x', color='black', s=50)
+
+    # POIs colored by weight
+    norm_poi = Normalize(vmin=1, vmax=10)
+    cmap_poi = cm.Reds
+    for poi in pois:
+        color = cmap_poi(norm_poi(poi.weight))
+        ax.scatter(poi.position[0], poi.position[1], 0,
+                   color=color, s=30)
+
+    # draw areas of interest outlines
+    for area in aois:
+        coords = np.array(area.polygon.exterior.coords)
+        ax.plot(coords[:,0], coords[:,1], color='magenta', linestyle='--', linewidth=1)
+
+    # Plot the 3D surface
+    surf = ax.plot_surface(X, Y, Z,
+                           cmap='viridis', edgecolor='none', alpha=0.7)
+
+    # Labels and colorbar
+    ax.set_xlabel("X (meters)")
+    ax.set_ylabel("Y (meters)")
+    ax.set_zlabel("Priority Intensity")
+    ax.set_box_aspect((1,1,(0.5)))  # X=Y, Z other ration
+    fig.colorbar(surf, ax=ax, shrink=0.5, aspect=10, label="Weighted Intensity")
+
+    plt.tight_layout()
+    plt.savefig(filename, dpi=300)
+    # plt.show()
     plt.close()
 
 def plot_voronoi_polygons(ax, points, bounds):
@@ -223,13 +324,18 @@ def create_triangle_marker(position, heading, size=5):
     return x, y
 
 # --- Region Targets ---
-def assign_voronoi_targets(drones, pois, bounds):
-    points = np.vstack([drone.position for drone in drones])
+def assign_voronoi_targets(drones, pois, aois, bounds):
+    # Filter only alive drones
+    alive_drones = [drone for drone in drones if drone.alive]
+    if not alive_drones:
+        return  # No alive drones to process
+
+    points = np.vstack([drone.position for drone in alive_drones])
     vor = Voronoi(points)
     bbox = box(0, 0, bounds[0], bounds[1])
 
     clipped_regions = clipped_voronoi_polygons_2d(vor, bounds)
-    for i, drone in enumerate(drones):
+    for i, drone in enumerate(alive_drones):
         drone.center_point = None
         drone.region_polygon = None
         drone.target = None
@@ -241,16 +347,24 @@ def assign_voronoi_targets(drones, pois, bounds):
         drone.region_polygon = poly
         drone.center_point = np.array(poly.centroid.coords[0])
 
-        # collect positions and weights of POIs in this cell
+        # Collect positions and weights of POIs in this cell
         points_in_region = []
         weights_in_region = []
         for poi in pois:
             if poly.covers(Point(poi.position)):
                 points_in_region.append(poi.position)
                 weights_in_region.append(poi.weight)
+
+        # Include areas of interest as additional weighted points
+        for area in aois:
+            if poly.intersects(area.polygon):
+                cent = np.array(area.polygon.centroid.coords[0])
+                points_in_region.append(cent)
+                weights_in_region.append(area.weight)
+
+        # Store for drawing and compute weighted target
         drone.targets_in_region = points_in_region
-        # compute weighted centroid if any POIs, otherwise fallback
-        if points_in_region:
+        if weights_in_region:
             drone.target = np.average(points_in_region,
                                       axis=0,
                                       weights=weights_in_region)
@@ -262,7 +376,10 @@ def generate_random_position(bounds):
     return np.random.uniform(0, bounds[0]), np.random.uniform(0, bounds[1])
 
 def simulate(bounds, num_steps=50, step_size=1.0, gif_filename="voronoi_simulation.gif"):
-    num_quad, num_fw, num_pois = 3, 0, 10
+    num_quad, num_fw, num_pois = 4, 0, 10
+    num_aois = np.random.randint(1, 6)     # random number of AOIs with generic convex shapes
+
+
     drones = [Quadcopter(generate_random_position(bounds)) for _ in range(num_quad)]
     pois = [
         PointOfInterest(generate_random_position(bounds),
@@ -270,9 +387,22 @@ def simulate(bounds, num_steps=50, step_size=1.0, gif_filename="voronoi_simulati
         for _ in range(num_pois)
     ]
 
-    # assign_voronoi_targets(drones, pois, bounds)  # Initial static frame
+    aois = []
+    for _ in range(num_aois):
+        cx, cy = generate_random_position(bounds)
+        num_vertices = np.random.randint(3, 9)
+        angles = np.sort(np.random.uniform(0, 2*np.pi, num_vertices))
+        r_min, r_max = min(bounds) * 0.05, min(bounds) * 0.15
+        poly_coords = []
+        for ang in angles:
+            r = np.random.uniform(r_min, r_max)
+            x = np.clip(cx + r * np.cos(ang), 0, bounds[0])
+            y = np.clip(cy + r * np.sin(ang), 0, bounds[1])
+            poly_coords.append((x, y))
+        aois.append(AreaOfInterest(poly_coords,
+                       weight=np.random.uniform(1, 5)))
 
-    draw_static(drones, pois, bounds, "voronoi_initial.png")
+    draw_static(drones, pois, aois, bounds, "voronoi_initial.png")
 
     fig, ax = plt.subplots(figsize=(16, 9))
     ax.set_xlim(0, bounds[0])
@@ -281,23 +411,31 @@ def simulate(bounds, num_steps=50, step_size=1.0, gif_filename="voronoi_simulati
     ax.set_autoscale_on(False)
 
     def update(frame):
+        # Check for drone 'deaths'
+        for drone in drones:
+            if drone.alive and random.random() < drone.death_prob and len([d for d in drones if d.alive]) > 3:
+                drone.alive = False
+
         # Recompute regions, centers, and targets each step
-        assign_voronoi_targets(drones, pois, bounds)
+        assign_voronoi_targets(drones, pois, aois, bounds)
 
         # Move drones towards their current target (region center if no POIs)
         for drone in drones:
             if isinstance(drone, Quadcopter):
-                if drone.target is not None:
+                if drone.alive and drone.target is not None:
                     drone.move_towards(drone.target, step_size)
 
         # Redraw the scene with updated regions and targets
-        draw_scene(ax, drones, pois, bounds)
+        draw_scene(ax, drones, pois, aois, bounds)
 
     anim = FuncAnimation(fig, update, frames=num_steps, interval=200)
     anim.save(gif_filename, dpi=80, writer=PillowWriter(fps=5))
     plt.close()
 
-    draw_static(drones, pois, bounds, "voronoi_final.png")
+    draw_static(drones, pois, aois, bounds, "voronoi_final.png")
+    
+    # draw 3D priority surface
+    draw_priority_surface(drones, pois, aois, bounds, "priority_surface.png")
 
 # --- Entry Point ---
 def main():
