@@ -249,6 +249,12 @@ def animate_simulation(drones, pois, aois, bounds, results_dir, num_steps=200, s
     ax.set_autoscale_on(False)
 
     def update(frame):
+        # Check for drone 'deaths'
+        for drone in drones:
+            if drone.alive and random.random() < drone.death_prob and len([d for d in drones if d.alive]) > 3:
+                drone.alive = False
+
+        
         # Assign Voronoi targets
         points = np.array([drone.position for drone in drones if drone.alive])
         if len(points) > 0:  # Ensure there are points to create a Voronoi diagram

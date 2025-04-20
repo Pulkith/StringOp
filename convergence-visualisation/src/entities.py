@@ -10,13 +10,13 @@ class Drone:
         self.center_point = None
         self.targets_in_region = []
         self.alive = True
-        self.death_prob = 0.03
+        self.death_prob = 0.01
 
     def set_death_prob(self, prob):
         self.death_prob = prob
         return self
     
-    
+
 
 class Quadcopter(Drone):
     def __init__(self, position):
