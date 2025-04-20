@@ -21,7 +21,7 @@ from tello_target_tracker.pose_estimation import PoseEstimation
 # Import the Tello library
 from tello_target_tracker.DJITelloPy.djitellopy import Tello
 
-from tello_interfaces.msg import DroneStatus, LocalPose, Object
+from tello_interfaces.msg import DroneStatus, LocalPose, Object, DroneAction
 
 class DroneState(enum.Enum):
     IDLE = 0
@@ -97,8 +97,8 @@ class TelloStateMachine(Node):
         
         # Create ROS subscribers
         self.target_assign_sub = self.create_subscription(
-            String,
-            f'/target_prioritization/assignments',
+            DroneAction,
+            f'/action',
             self.target_assignment_callback,
             10
         )
@@ -191,21 +191,20 @@ class TelloStateMachine(Node):
     def target_assignment_callback(self, msg):
         """Process target assignment from prioritization module"""
         # Parse the assignment message (format: "drone_id:target_id")
-        assignments = msg.data.split(';')
+        if msg.drone_id != self.drone_id:
+            self.get_logger().warn(f"Received assignment for drone {msg.drone_id}, but this is drone {self.drone_id}")
+            return
+        assignment = msg.object_id
+        if assignment is None or assignment == "":
+            self.get_logger().warn("Received empty assignment, skipping")
+            return
         
-        for assignment in assignments:
-            if not assignment:
-                continue
-                
-            drone_id, target_id = assignment.split(':')
-            
-            if int(drone_id) == self.drone_id:
-                self.assigned_target_id = int(target_id)
-                self.get_logger().info(f"Drone {self.drone_id} assigned to target {self.assigned_target_id}")
-                
-                # If we were searching or waiting, now we should track
-                if self.current_state in [DroneState.SEARCHING, DroneState.WAITING_FOR_ASSIGNMENT]:
-                    self.change_state(DroneState.TRACKING)
+        self.assigned_target_id = int(assignment)
+        self.get_logger().info(f"Drone {self.drone_id} assigned to target {self.assigned_target_id}")
+        
+        # If we were searching or waiting, now we should track
+        if self.current_state in [DroneState.SEARCHING, DroneState.WAITING_FOR_ASSIGNMENT]:
+            self.change_state(DroneState.TRACKING)
     
     def start_mission_callback(self, request, response):
         """Service callback to start the mission"""
@@ -248,7 +247,8 @@ class TelloStateMachine(Node):
             return False
                 
         elapsed_time = time.time() - self.target_last_seen
-        
+        if elapsed_time < 1.0:
+            return False
         # Short loss - hover in place and look around slightly
         if elapsed_time < 2.0:
             self.get_logger().debug(f"Target {self.assigned_target_id} briefly lost, hovering")
@@ -310,7 +310,7 @@ class TelloStateMachine(Node):
         # Maintain target distance of 150cm
         target_distance = 150.0  # Desired distance in cm
         distance_error = distance - target_distance
-        x_vel = int(max(min(distance_error * 0.2, 30), -30))
+        x_vel = int(max(min(distance_error * 0.5, 30), -30))
         
         # Y axis control (left/right)
         # Use heading to center the target
@@ -663,7 +663,13 @@ class TelloStateMachine(Node):
                     # Here you would publish a message with these candidates
                     self.publish_candidate_targets(candidates)
                     # change state to WAITING_FOR_ASSIGNMENT
-                    self.change_state(DroneState.WAITING_FOR_ASSIGNMENT)
+                    # self.change_state(DroneState.WAITING_FOR_ASSIGNMENT)
+
+                    # find the target with the closest distance
+                    closest_target = min(candidates, key=lambda x: self.targets[x[0]]['distance'])
+                    self.assigned_target_id = closest_target[0]
+                    self.change_state(DroneState.TRACKING)
+
 
     def _handle_similar_targets(self, current_tid):
         """

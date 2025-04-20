@@ -22,6 +22,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/DroneStatus.msg"
   "msg/TargetInfo.msg"
   "msg/LocalPose.msg"
+  "msg/DroneAction.msg"
   DEPENDENCIES geometry_msgs std_msgs
 )
 
