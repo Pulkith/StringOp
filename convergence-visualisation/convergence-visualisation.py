@@ -8,6 +8,8 @@ from matplotlib.collections import LineCollection, PatchCollection
 from matplotlib.patches import Polygon as MplPolygon
 from shapely.geometry import Polygon, Point, box
 from shapely.ops import unary_union, split
+from matplotlib import cm
+from matplotlib.colors import Normalize
 import uuid
 
 def clipped_voronoi_polygons_2d(vor, bounds):
@@ -73,9 +75,10 @@ class FixedWing(Drone):
         self.heading = heading
 
 class PointOfInterest:
-    def __init__(self, position):
+    def __init__(self, position, weight=1.0):
         self.position = np.array(position)
         self.id = str(uuid.uuid4())
+        self.weight = weight
 
 # --- Visualization ---
 def draw_scene(ax, drones, pois, bounds,
@@ -91,6 +94,10 @@ def draw_scene(ax, drones, pois, bounds,
     ax.set_aspect('equal')
     ax.set_autoscale_on(False)
     ax.plot(*create_rectangle_marker(bounds), color='black', linewidth=2)
+
+    # colormap for POI priority (weight)
+    norm_poi = Normalize(vmin=1, vmax=10)
+    cmap_poi = cm.Reds
 
     # Draw clipped Voronoi polygons
     patches = []
@@ -142,7 +149,8 @@ def draw_scene(ax, drones, pois, bounds,
             ax.plot(*triangle, color='black')
 
     for poi in pois:
-        ax.scatter(*poi.position, color='red', s=40)
+        color = cmap_poi(norm_poi(poi.weight))
+        ax.scatter(*poi.position, color=color, s=40)
 
     # Legend (applies to both static and animation)
     drone_handle      = mlines.Line2D([], [], color='black', marker='x', linestyle='None', markersize=8, label='Quadcopter')
@@ -233,12 +241,20 @@ def assign_voronoi_targets(drones, pois, bounds):
         drone.region_polygon = poly
         drone.center_point = np.array(poly.centroid.coords[0])
 
-        points_in_region = [poi.position for poi in pois if poly.covers(Point(poi.position))]
+        # collect positions and weights of POIs in this cell
+        points_in_region = []
+        weights_in_region = []
+        for poi in pois:
+            if poly.covers(Point(poi.position)):
+                points_in_region.append(poi.position)
+                weights_in_region.append(poi.weight)
         drone.targets_in_region = points_in_region
+        # compute weighted centroid if any POIs, otherwise fallback
         if points_in_region:
-            drone.target = np.mean(points_in_region, axis=0)
+            drone.target = np.average(points_in_region,
+                                      axis=0,
+                                      weights=weights_in_region)
         else:
-            # No POIs in region: move to center of the region polygon
             drone.target = drone.center_point
 
 # --- Main Simulation ---
@@ -248,7 +264,11 @@ def generate_random_position(bounds):
 def simulate(bounds, num_steps=50, step_size=1.0, gif_filename="voronoi_simulation.gif"):
     num_quad, num_fw, num_pois = 3, 0, 10
     drones = [Quadcopter(generate_random_position(bounds)) for _ in range(num_quad)]
-    pois = [PointOfInterest(generate_random_position(bounds)) for _ in range(num_pois)]
+    pois = [
+        PointOfInterest(generate_random_position(bounds),
+                        weight=np.random.uniform(2.0, 10.0))
+        for _ in range(num_pois)
+    ]
 
     # assign_voronoi_targets(drones, pois, bounds)  # Initial static frame
 
