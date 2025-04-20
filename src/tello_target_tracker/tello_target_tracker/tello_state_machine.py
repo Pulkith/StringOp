@@ -46,6 +46,10 @@ class TelloStateMachine(Node):
         self.target_last_seen = 0
         self.target_height = 175 # Default height in cm
 
+        # Dictionary to save velocity values to integrate
+        self.velocity = {"x": None, "y": None, "z": None}
+        self.position = {"x": 0, "y": 0, "z": 0}  # Estimated position (starting at 0, 0, 0)
+
         # Flag to track whether camera is initialized
         self.camera_initialized = False
         self.camera_error = False
@@ -696,6 +700,18 @@ class TelloStateMachine(Node):
             self.tello.end()
         except Exception:
             self.get_logger().error("Failed to properly end Tello connection")
+
+    def get_position(self):
+        """Get the current position of the drone"""
+        try:
+            if all(v is not None for v in self.velocity.values()):
+                self.position["x"] += self.velocity["x"] * 0.1
+                self.position["y"] += self.velocity["y"] * 0.1
+                self.position["z"] = self.tello.get_height()
+                self.logger().info(f"Current position: {self.position}")
+        except Exception as e:
+            self.get_logger().error(f"Error getting position: {str(e)}")
+            return None
 
 def main(args=None):
     rclpy.init(args=args)

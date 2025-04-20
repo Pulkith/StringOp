@@ -13,7 +13,8 @@ DISPLAY=":0"
 
 # Ensure the host directory exists
 if [ ! -d "$HOST_DIR" ]; then
-  echo "Error: Host directory $HOST_DIR does not exist."
+  echo "Error: host directory '$HOST_DIR' not found."
+  echo "Usage: $0 [path_to_your_ros_ws]" >&2
   exit 1
 fi
 
