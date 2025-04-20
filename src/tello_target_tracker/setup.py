@@ -10,7 +10,7 @@ setup(
     packages=['tello_target_tracker', 'tello_target_tracker.DJITelloPy.djitellopy'],
     data_files=[
         ('share/ament_index/resource_index/packages',
-            ['package.xml']),  # Changed to use package.xml directly
+            ['resource/' + package_name]),  # Changed to use proper marker file
         ('share/' + package_name, ['package.xml']),
         # Include all launch files
         (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
