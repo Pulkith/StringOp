@@ -1,7 +1,7 @@
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
-from tello_interfaces.msg import DroneStatus
+from tello_interfaces.msg import DroneStatus, DroneAction
 import numpy as np
 import pose_graph
 
@@ -10,9 +10,6 @@ class DroneCoordinator(Node):
         super().__init__('drone_coordinator')
         self.state = pose_graph.GlobalState()
 
-        # Subscribers and Publishers
-
-        drone_id = "drone0"
         # Subscriber
         self.drone_state_sub = self.create_subscription(
             DroneStatus,
@@ -21,7 +18,7 @@ class DroneCoordinator(Node):
             10
         )
         # Publisher
-        self.drone_action_pub = self.create_publisher(String, f'{drone_id}_action', 10)
+        self.drone_action_pub = self.create_publisher(DroneAction, f'action', 10)
 
         self.get_logger().info("Drone Coordinator Node has been started.")
         
@@ -63,6 +60,14 @@ class DroneCoordinator(Node):
             objects.append((object_pose, object_attributes))
 
         self.state.update_drone_objects(drone_id, objects)
+
+        if True:
+            msg = DroneAction()
+            msg.drone_id = drone_id
+            msg.object_id = 0
+
+            self.drone_action_pub.publish(msg)
+            self.get_logger().info(f"Updated state for {drone_id} with {len(objects)} objects.")
 
 
 def main(args=None):
