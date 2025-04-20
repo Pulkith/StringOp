@@ -8,6 +8,8 @@ from std_msgs.msg import String, Bool
 from geometry_msgs.msg import Point, Twist, Vector3
 from tello_interfaces.msg import TargetInfo, DroneStatus
 
+from tello_target_tracker.camera_getter import TelloCamera
+
 # Add this import
 from std_srvs.srv import SetBool
 
@@ -43,6 +45,8 @@ class TelloStateMachine(Node):
         # Initialize Tello drone
         self.tello = Tello()
         self.connect_to_drone()
+
+        self.tello_camera = TelloCamera()
         
         # Create ROS publishers
         self.state_pub = self.create_publisher(
@@ -297,6 +301,12 @@ class TelloStateMachine(Node):
                 self.change_state(DroneState.IDLE)
             
         elif self.current_state == DroneState.SEARCHING:
+
+            # get frame
+            frame = self.tello_camera.get_frame()
+
+            # run yolo tracking - TODO
+            targets, status = yolo_tracking(frame)
 
             # Check if any targets are detected (without waiting for assignment)
             if self.targets:

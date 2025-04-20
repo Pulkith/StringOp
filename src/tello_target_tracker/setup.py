@@ -11,7 +11,9 @@ setup(
     data_files=[
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),  # Changed to use proper marker file
-        ('share/' + package_name, ['package.xml']),
+        ('share/' + package_name, ['package.xml'],
+        'share/' + package_name, ['resource/ost.yaml'],
+        ),
         # Include all launch files
         (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
     ],
