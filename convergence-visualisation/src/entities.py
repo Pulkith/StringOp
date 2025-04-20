@@ -12,6 +12,12 @@ class Drone:
         self.alive = True
         self.death_prob = 0.03
 
+    def set_death_prob(self, prob):
+        self.death_prob = prob
+        return self
+    
+    
+
 class Quadcopter(Drone):
     def __init__(self, position):
         super().__init__(position)
