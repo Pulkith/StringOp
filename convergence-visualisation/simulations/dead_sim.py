@@ -14,13 +14,13 @@ def run(bounds=(160, 90), num_steps=200, seed=1):
     random.seed(seed)
 
     # Create results directory
-    results_dir = "results/basic_sim"
+    results_dir = "results/dead_sim"
     os.makedirs(results_dir, exist_ok=True)
 
     # Define the values of the simulation
-    num_drones = 3
+    num_drones = 5
     num_fw = 0
-    num_pois = 4
+    num_pois = 10
 
     # Initialize drones, POIs, and AOIs
     def random_point():

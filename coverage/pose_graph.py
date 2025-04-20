@@ -18,7 +18,9 @@ class LocalPose:
 
 @dataclass
 class ObjectAttributes:
-    color: Tuple[int, int, int]
+    r: float
+    g: float
+    b: float
     size_x: float
     size_y: float
 
@@ -77,10 +79,8 @@ class GlobalState:
         if is_new_object:
             self.objects.append((object_pose, object_attributes))
 
-    def set_drone_data(self, drone_id: str, objects: List[Tuple[LocalPose, ObjectAttributes]], drone_pose: GlobalPose) -> Dict:
-        # Update object poses
-        self.drones[drone_id] = drone_pose
-
+    def update_drone_objects(self, drone_id: str, objects: List[Tuple[LocalPose, ObjectAttributes]]) -> Dict:
+        drone_pose = self.drones[drone_id]
         # Update object poses with low pass filter (ADMM like approach)
         for drone_object in objects:
             relative_object_vector = to_vector(drone_object[0], drone_object[1])
@@ -93,3 +93,14 @@ class GlobalState:
             print(f"Global object vector: {global_object_vector}")
             self.add_or_update_object(global_object_vector, drone_object[1])
 
+
+    def get_drone_action():
+        # Placeholder for drone action logic
+        pass
+
+if __name__ == "__main__":
+    # Example usage
+    global_state = GlobalState()
+
+
+    global_state

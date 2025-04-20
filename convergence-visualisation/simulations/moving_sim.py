@@ -14,19 +14,29 @@ def run(bounds=(160, 90), num_steps=200, seed=1):
     random.seed(seed)
 
     # Create results directory
-    results_dir = "results/basic_sim"
+    results_dir = "results/moving_sim"
     os.makedirs(results_dir, exist_ok=True)
 
     # Define the values of the simulation
     num_drones = 3
     num_fw = 0
-    num_pois = 4
+    num_pois = 8
 
     # Initialize drones, POIs, and AOIs
     def random_point():
         return (random.uniform(0, bounds[0]), random.uniform(0, bounds[1]))
     drones = [Quadcopter(random_point()) for _ in range(num_drones)]
-    pois = [PointOfInterest(random_point(), weight=8) for _ in range(num_pois)]
+    moving_percentage = 0.3  # 30% of POIs will move
+    pois = [
+        PointOfInterest(
+            random_point(),
+            weight=random.uniform(1.0, 10.0),
+            moving=random.random() < moving_percentage,
+            speed=random.uniform(1.0, 6.0)
+        )
+        for _ in range(num_pois)
+    ]
+    # print(pois)
     aois = []
 
     # Draw initial configuration
