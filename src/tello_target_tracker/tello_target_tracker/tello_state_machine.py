@@ -14,6 +14,9 @@ from tello_target_tracker.camera_getter import TelloCamera
 from tello_target_tracker.person_tracker import PersonTracker
 from std_srvs.srv import SetBool
 
+# Import the ROS visualization module
+from tello_target_tracker.ros_visualization import RosVisualizer, draw_tracking_status
+
 # Import the Tello library
 from tello_target_tracker.DJITelloPy.djitellopy import Tello
 
@@ -57,9 +60,12 @@ class TelloStateMachine(Node):
         )
         
         # Target acquisition parameters
-        self.min_detections_for_tracking = 5  # Require 5 consecutive detections
+        self.min_detections_for_tracking = 3  # Reduce from 5 to make tracking faster
         self.detection_persistence_count = 0
         self.potential_target_id = None
+        
+        # Initialize the ROS visualizer
+        self.visualizer = RosVisualizer(self, history_length=200)
 
         self.connect_to_drone()
         
@@ -144,6 +150,9 @@ class TelloStateMachine(Node):
             self.get_logger().info("Initializing camera...")
             # Start the video capture
             self.tello_camera.start_video_capture()
+            
+            # Start the visualizer
+            self.visualizer.start()
             
             # Wait for camera to actually produce frames
             for attempt in range(5):
@@ -254,12 +263,20 @@ class TelloStateMachine(Node):
         elif elapsed_time < 3.0:
             self.get_logger().debug(f"Target {self.assigned_target_id} briefly lost, hovering")
             self.tello.send_rc_control(0, 0, 0, 10 * self.search_direction)
+            
+            # Update the visualization
+            self.visualizer.update_control_values(0, 0, 0, 10 * self.search_direction, time.time())
+            
             return False
             
         # Medium loss - start turning in place to find target
         elif elapsed_time < self.target_lost_threshold:
             self.get_logger().debug(f"Target {self.assigned_target_id} lost for {elapsed_time:.1f}s, searching in place")
             self.tello.send_rc_control(0, 0, 0, 20 * self.search_direction)
+            
+            # Update the visualization
+            self.visualizer.update_control_values(0, 0, 0, 20 * self.search_direction, time.time())
+            
             return False
             
         # Long loss - target officially lost, return to searching state
@@ -275,6 +292,9 @@ class TelloStateMachine(Node):
         # Use Tello's RC control for rotation search
         # Rotate in place to look for targets
         self.tello.send_rc_control(0, 0, 0, 30 * self.search_direction)
+        
+        # Update the visualization
+        self.visualizer.update_control_values(0, 0, 0, 30 * self.search_direction, time.time())
         
         # Toggle search direction periodically using a proper timer
         current_time = time.time()
@@ -318,6 +338,9 @@ class TelloStateMachine(Node):
         # Send RC control command to Tello
         self.tello.send_rc_control(y_vel, x_vel, z_vel, yaw_vel)
         
+        # Update the visualization
+        self.visualizer.update_control_values(y_vel, x_vel, z_vel, yaw_vel, time.time())
+        
         self.get_logger().debug(f"Tracking: distance={distance:.2f}cm, heading={heading:.2f}, " 
                            f"vels=[{y_vel},{x_vel},{z_vel},{yaw_vel}]")
 
@@ -338,20 +361,6 @@ class TelloStateMachine(Node):
                 self.get_logger().info(f"Detected {len(person_tracks)} persons: {[tr['track_id'] for tr in person_tracks]}")
             else:
                 self.get_logger().debug("No persons detected in frame")
-            
-            # # Create a visualization with more info
-            # annotated_frame = frame.copy()
-            # for track in person_tracks:
-            #     l, t, r, b = track["bbox"]
-            #     tid = track["track_id"]
-            #     # Draw more visible rectangle
-            #     cv2.rectangle(annotated_frame, (l, t), (r, b), (0, 255, 0), 3)
-            #     cv2.putText(annotated_frame, f"ID:{tid}", (l, t-10), 
-            #                 cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-            
-            # # Show the image
-            # cv2.imshow("Tracked Persons", annotated_frame)
-            # cv2.waitKey(1)
             
             # Process detections
             frame_height, frame_width = frame.shape[:2]
@@ -416,6 +425,21 @@ class TelloStateMachine(Node):
             
             # Handle lost targets
             self.cleanup_lost_targets(detected_ids, current_time)
+            
+            # Create annotated frame for visualization
+            annotated_frame = draw_tracking_status(
+                frame, 
+                self.current_state.name, 
+                self.assigned_target_id,
+                self.potential_target_id,
+                self.detection_persistence_count,
+                self.min_detections_for_tracking,
+                self.targets
+            )
+            
+            # Update the visualization
+            if annotated_frame is not None:
+                self.visualizer.update_frame(annotated_frame)
             
             # Add summary of current tracking state after processing
             self.get_logger().info(f"Current state: {self.current_state.name}, " +
@@ -497,6 +521,9 @@ class TelloStateMachine(Node):
             # Hover in place
             self.tello.send_rc_control(0, 0, 0, 0)
             
+            # Update visualization
+            self.visualizer.update_control_values(0, 0, 0, 0, time.time())
+            
             # If targets are detected but none assigned, request assignment
             if self.targets and self.assigned_target_id is None:
                 self.get_logger().debug("Waiting for target assignment...")
@@ -519,6 +546,9 @@ class TelloStateMachine(Node):
             else:
                 # Hover in place if target temporarily not visible
                 self.tello.send_rc_control(0, 0, 0, 0)
+                
+                # Update visualization
+                self.visualizer.update_control_values(0, 0, 0, 0, time.time())
         
         elif self.current_state == DroneState.LANDING:
             # Execute landing procedure
@@ -594,7 +624,6 @@ class TelloStateMachine(Node):
                 # Force state change to tracking
                 self.change_state(DroneState.TRACKING)
 
-
     def cleanup_lost_targets(self, detected_ids, current_time):
         """Clean up lost targets and handle persistence, with improved logic for track ID changes"""
         # Don't immediately reset potential target if it disappears momentarily
@@ -620,7 +649,6 @@ class TelloStateMachine(Node):
                 if tid != self.assigned_target_id:  # Keep assigned target longer
                     del self.targets[tid]
 
-                    
     def start_mission(self):
         if self.current_state == DroneState.IDLE:
             self.get_logger().info("Starting mission")
@@ -644,6 +672,10 @@ class TelloStateMachine(Node):
     
     def cleanup(self):
         """Clean up resources and land the drone"""
+        # Stop visualizer
+        if hasattr(self, 'visualizer'):
+            self.visualizer.stop()
+        
         # Stop camera stream
         if hasattr(self, 'tello_camera') and self.camera_initialized:
             try:

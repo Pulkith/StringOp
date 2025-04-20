@@ -30,6 +30,9 @@ class TelloCamera:
         self.frame_lock = threading.Lock()
         self.thread = None
         self.last_frame_time = 0
+
+        self.optimize_video_stream()
+        
         print("TelloCamera initialized.")
     
     def start_video_capture(self):
@@ -60,6 +63,18 @@ class TelloCamera:
             print(f"Error starting video capture: {str(e)}")
             raise
     
+    def optimize_video_stream(self):
+        """Apply optimizations to improve video streaming performance"""
+        # Set lower resolution if supported by your Tello model
+        # For example on Tello EDU:
+        try:
+            self.tello.set_video_resolution(self.tello.RESOLUTION_480P)
+            self.tello.set_video_fps(self.tello.FPS_15)  # Lower frame rate
+            self.tello.set_video_bitrate(self.tello.BITRATE_2M)  # Lower bitrate
+            print("Video streaming optimizations applied")
+        except Exception as e:
+            print(f"Unable to apply video optimizations: {str(e)}")
+
     def _capture_loop(self):
         """Background thread that continuously captures frames"""
         frame_count = 0
@@ -94,12 +109,12 @@ class TelloCamera:
                         print(f"Received None frame from Tello ({error_count} errors)")
                 
                 # Sleep to avoid tight loop
-                time.sleep(0.1)
+                time.sleep(0.2)
                 
             except Exception as e:
                 error_count += 1
                 print(f"Error in capture loop: {str(e)}")
-                time.sleep(0.1)  # Longer sleep on error
+                time.sleep(0.2)  # Longer sleep on error
     
     def get_frame(self):
         """Get the latest frame with thread safety"""
