@@ -15,6 +15,14 @@
   <depend>std_srvs</depend>
   <depend>tello_interfaces</depend>
 
+  <depend>python3-opencv</depend>
+  <depend>python3-torch</depend>
+  <depend>python3-numpy</depend>
+
+  <exec_depend>python3-pip</exec_depend>
+  <exec_depend>ultralytics</exec_depend>
+  <exec_depend>deep-sort-realtime</exec_depend>
+
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_pep257</test_depend>

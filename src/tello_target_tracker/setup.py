@@ -9,14 +9,13 @@ setup(
     version='0.1.0',
     packages=['tello_target_tracker', 'tello_target_tracker.DJITelloPy.djitellopy'],
     data_files=[
-        ('share/ament_index/resource_index/packages',
-            ['resource/' + package_name]),  # Changed to use proper marker file
-        ('share/' + package_name, ['package.xml'],
-        'share/' + package_name, ['resource/ost.yaml'],
-        ),
-        # Include all launch files
-        (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
-    ],
+    ('share/ament_index/resource_index/packages',
+     ['resource/' + package_name]), 
+    ('share/' + package_name, ['package.xml']),  # Fixed: separate tuple
+    ('share/' + package_name, ['resource/ost.yaml']),  # Fixed: separate tuple
+    # Include all launch files
+    (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
+],
     install_requires=['setuptools'],
     zip_safe=True,
     maintainer='Your Name',

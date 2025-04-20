@@ -3,16 +3,16 @@
 import enum
 import time
 import rclpy
+import numpy as np
+import cv2
 from rclpy.node import Node
 from std_msgs.msg import String, Bool
 from geometry_msgs.msg import Point, Twist, Vector3
 from tello_interfaces.msg import TargetInfo, DroneStatus
 
 from tello_target_tracker.camera_getter import TelloCamera
-
-# Add this import
+from tello_target_tracker.person_tracker import PersonTracker
 from std_srvs.srv import SetBool
-
 
 # Import the Tello library
 from tello_target_tracker.DJITelloPy.djitellopy import Tello
@@ -41,12 +41,27 @@ class TelloStateMachine(Node):
         self.targets = {}  # Dictionary of detected targets
         self.assigned_target_id = None
         self.target_last_seen = 0
+        self.target_height = 175 # Default height in cm
+
+        # Flag to track whether camera is initialized
+        self.camera_initialized = False
+        self.camera_error = False
+        self.last_camera_retry = 0
+        self.camera_retry_interval = 5.0  # seconds
         
         # Initialize Tello drone
         self.tello = Tello()
-        self.connect_to_drone()
+        self.person_tracker = PersonTracker(
+            conf_thresh=0.4,
+            color_filter=False  # Set to True if you want to filter by color
+        )
+        
+        # Target acquisition parameters
+        self.min_detections_for_tracking = 5  # Require 5 consecutive detections
+        self.detection_persistence_count = 0
+        self.potential_target_id = None
 
-        self.tello_camera = TelloCamera()
+        self.connect_to_drone()
         
         # Create ROS publishers
         self.state_pub = self.create_publisher(
@@ -61,25 +76,12 @@ class TelloStateMachine(Node):
         )
         
         # Create ROS subscribers
-        self.target_detect_sub = self.create_subscription(
-            TargetInfo,
-            f'/perception/targets',
-            self.target_detection_callback,
-            10
-        )
         self.target_assign_sub = self.create_subscription(
             String,
             f'/target_prioritization/assignments',
             self.target_assignment_callback,
             10
         )
-        self.emergency_sub = self.create_subscription(
-            Bool,
-            '/emergency',
-            self.emergency_callback,
-            10
-        )
-        
         
         self.start_service = self.create_service(
             SetBool, 
@@ -111,6 +113,10 @@ class TelloStateMachine(Node):
                 self.get_logger().info(f"Connected to Tello drone. Battery: {battery}%")
                 if battery < 20:
                     self.get_logger().warn(f"Low battery: {battery}%! Charge before extended flight.")
+                
+                # Initialize camera after successful connection
+                self.tello_camera = TelloCamera(self.tello)
+                
                 return True
             except Exception as e:
                 retry_count += 1
@@ -122,20 +128,41 @@ class TelloStateMachine(Node):
                     self.get_logger().error("Maximum retries exceeded. Check if drone is powered on and Wi-Fi is connected.")
                     return False
     
-    def target_detection_callback(self, msg):
-        """Process target detection from perception module"""
-        # Update the targets dictionary with new detection
-        self.targets[msg.target_id] = {
-            'position': msg.relative_position,
-            'timestamp': time.time(),
-            'confidence': msg.confidence
-        }
+    def initialize_camera(self):
+        """Initialize the camera with retry mechanism"""
+        if self.camera_initialized:
+            return True
+            
+        # Check if enough time has passed since last retry
+        current_time = time.time()
+        if current_time - self.last_camera_retry < self.camera_retry_interval:
+            return False
+            
+        self.last_camera_retry = current_time
         
-        # If tracking this target, update last seen time
-        if self.assigned_target_id is not None and msg.target_id == self.assigned_target_id:
-            self.target_last_seen = time.time()
-            self.get_logger().debug(f"Tracking target {self.assigned_target_id} at position: "
-                                  f"x={msg.relative_position.x}, y={msg.relative_position.y}, z={msg.relative_position.z}")
+        try:
+            self.get_logger().info("Initializing camera...")
+            # Start the video capture
+            self.tello_camera.start_video_capture()
+            
+            # Wait for camera to actually produce frames
+            for attempt in range(5):
+                time.sleep(0.5)
+                frame = self.tello_camera.get_frame()
+                if frame is not None:
+                    self.get_logger().info(f"Camera initialized successfully! Frame shape: {frame.shape}")
+                    self.camera_initialized = True
+                    self.camera_error = False
+                    return True
+            
+            self.get_logger().error("Camera initialization timed out - no frames received")
+            self.camera_error = True
+            return False
+            
+        except Exception as e:
+            self.get_logger().error(f"Failed to initialize camera: {str(e)}")
+            self.camera_error = True
+            return False
     
     def target_assignment_callback(self, msg):
         """Process target assignment from prioritization module"""
@@ -155,12 +182,6 @@ class TelloStateMachine(Node):
                 # If we were searching or waiting, now we should track
                 if self.current_state in [DroneState.SEARCHING, DroneState.WAITING_FOR_ASSIGNMENT]:
                     self.change_state(DroneState.TRACKING)
-    
-    def emergency_callback(self, msg):
-        """Handle emergency signals"""
-        if msg.data:
-            self.get_logger().warn("Emergency signal received!")
-            self.change_state(DroneState.EMERGENCY)
     
     def start_mission_callback(self, request, response):
         """Service callback to start the mission"""
@@ -213,16 +234,41 @@ class TelloStateMachine(Node):
             self.previous_state = self.current_state
             self.current_state = new_state
             self.get_logger().info(f"State changed: {self.previous_state.name} -> {self.current_state.name}")
+            
+            # If transitioning to a state that needs camera, make sure it's ready
+            if new_state in [DroneState.SEARCHING, DroneState.TRACKING] and not self.camera_initialized:
+                self.initialize_camera()
     
     def check_target_timeout(self):
-        """Check if the tracked target has timed out"""
-        if self.assigned_target_id is not None:
-            # If target hasn't been seen for the threshold time
-            if time.time() - self.target_last_seen > self.target_lost_threshold:
-                self.get_logger().warn(f"Target {self.assigned_target_id} lost! Returning to search.")
-                self.assigned_target_id = None
-                return True
-        return False
+        """Check if the tracked target has timed out and manage recovery phases"""
+        if self.assigned_target_id is None:
+            return False
+            
+        elapsed_time = time.time() - self.target_last_seen
+        
+        # Target still visible recently
+        if elapsed_time < 1.0:
+            return False
+            
+        # Short loss - hover in place and look around slightly
+        elif elapsed_time < 3.0:
+            self.get_logger().debug(f"Target {self.assigned_target_id} briefly lost, hovering")
+            self.tello.send_rc_control(0, 0, 0, 10 * self.search_direction)
+            return False
+            
+        # Medium loss - start turning in place to find target
+        elif elapsed_time < self.target_lost_threshold:
+            self.get_logger().debug(f"Target {self.assigned_target_id} lost for {elapsed_time:.1f}s, searching in place")
+            self.tello.send_rc_control(0, 0, 0, 20 * self.search_direction)
+            return False
+            
+        # Long loss - target officially lost, return to searching state
+        else:
+            self.get_logger().warn(f"Target {self.assigned_target_id} lost for {elapsed_time:.1f}s! Returning to search.")
+            self.assigned_target_id = None
+            self.potential_target_id = None
+            self.detection_persistence_count = 0
+            return True
     
     def execute_search_pattern(self):
         """Execute a search pattern to find targets"""
@@ -242,43 +288,164 @@ class TelloStateMachine(Node):
             self.get_logger().info(f"Changing search direction to {self.search_direction}")
     
     def execute_tracking(self):
-        """Execute tracking behavior based on target position"""
+        """Execute tracking behavior based on heading and distance"""
         if self.assigned_target_id is None or self.assigned_target_id not in self.targets:
             return
             
         target = self.targets[self.assigned_target_id]
-        pos = target['position']
-        
-        # Braitenberg-inspired following behavior
-        # Convert position to velocity commands
+        heading = target['heading']
+        distance = target['distance']
+        height_offset = target['position'].y
         
         # X axis control (forward/backward)
-        # Maintain distance from target
-        target_distance = 100.0  # Desired distance in cm
-        x_vel = int(max(min((pos.z - target_distance) * 0.3, 30), -30))
+        # Maintain target distance of 150cm
+        target_distance = 150.0  # Desired distance in cm
+        distance_error = distance - target_distance
+        x_vel = int(max(min(distance_error * 0.2, 30), -30))
         
         # Y axis control (left/right)
-        y_vel = int(max(min(-pos.x * 0.3, 30), -30))
+        # Use heading to center the target
+        y_vel = int(max(min(-heading * 40, 30), -30))
         
         # Z axis control (up/down)
-        z_vel = int(max(min(pos.y * 0.3, 30), -30))
+        # Keep target centered vertically
+        z_vel = int(max(min(height_offset * 30, 30), -30))
         
-        # Yaw control to keep facing target
-        yaw_vel = int(max(min(pos.x * 0.5, 30), -30))
+        # Yaw control (rotation)
+        # Turn to face target directly
+        yaw_vel = int(max(min(heading * 60, 30), -30))
         
         # Send RC control command to Tello
         self.tello.send_rc_control(y_vel, x_vel, z_vel, yaw_vel)
         
-        # Also publish for visualization/debugging
-        cmd = Twist()
-        cmd.linear.x = x_vel / 100.0  # Normalize to -1.0 to 1.0 for ROS
-        cmd.linear.y = y_vel / 100.0
-        cmd.linear.z = z_vel / 100.0
-        cmd.angular.z = yaw_vel / 100.0
-        self.cmd_vel_pub.publish(cmd)
-    
+        self.get_logger().debug(f"Tracking: distance={distance:.2f}cm, heading={heading:.2f}, " 
+                           f"vels=[{y_vel},{x_vel},{z_vel},{yaw_vel}]")
+
+    def process_frame(self, frame):
+        """Process camera frame to detect and track targets"""
+        try:
+            if frame is None or frame.size == 0:
+                self.get_logger().warn("Received empty frame, skipping processing")
+                return
+                
+            # Log the frame shape
+            self.get_logger().debug(f"Processing frame: {frame.shape}")
+            
+            # Run person detection
+            person_tracks = self.person_tracker.process_frame(frame)
+            self.get_logger().debug(f"Detected {len(person_tracks)} persons")
+            
+            # Create a visualization with more info
+            # annotated_frame = frame.copy()
+            # for track in person_tracks:
+            #     l, t, r, b = track["bbox"]
+            #     tid = track["track_id"]
+            #     # Draw more visible rectangle
+            #     cv2.rectangle(annotated_frame, (l, t), (r, b), (0, 255, 0), 3)
+            #     cv2.putText(annotated_frame, f"ID:{tid}", (l, t-10), 
+            #                 cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            
+            # # Show the image
+            # cv2.imshow("Tracked Persons", annotated_frame)
+            # cv2.waitKey(1)
+            
+            # Process detections
+            frame_height, frame_width = frame.shape[:2]
+            current_time = time.time()
+            detected_ids = set()
+            
+            for track in person_tracks:
+                # Extract bounding box and track id
+                l, t, r, b = track["bbox"]
+                tid = track["track_id"]
+                detected_ids.add(tid)
+                
+                # Calculate center point
+                cx = (l + r) / 2
+                cy = (t + b) / 2
+                
+                # Calculate relative position (-1 to 1 coordinates)
+                rel_x = (cx - frame_width/2) / (frame_width/2)  # Left-right
+                rel_y = (cy - frame_height/2) / (frame_height/2)  # Up-down
+                
+                # Calculate heading (positive is right, negative is left)
+                heading = rel_x
+                
+                # Calculate distance using bounding box area
+                # Second-order polynomial scaling (adjust coefficients based on calibration)
+                box_width = r - l
+                box_height = b - t
+                area = box_width * box_height
+                area_ratio = area / (frame_width * frame_height)
+                
+                # Simple second-order polynomial for distance estimation (in cm)
+                # distance = a*(area_ratio)^2 + b*(area_ratio) + c
+                # These coefficients should be calibrated for your drone and target size
+                a = 25000
+                b = -3500
+                c = 350
+                estimated_distance = a*(area_ratio**2) + b*area_ratio + c
+                
+                # Clamp the distance to reasonable values (in cm)
+                estimated_distance = max(50, min(500, estimated_distance))
+                
+                # Normalize for our -1 to 1 scale
+                rel_z = (estimated_distance - 50) / 450  # Maps 50cm->0.0, 500cm->1.0
+                
+                # Update target information
+                self.targets[tid] = {
+                    'position': Point(x=rel_x, y=rel_y, z=rel_z),
+                    'heading': heading,
+                    'distance': estimated_distance,
+                    'timestamp': current_time,
+                    'confidence': min(1.0, area_ratio * 20),  # Simple confidence metric
+                    'bbox': (l, t, r, b)
+                }
+                
+                self.get_logger().debug(
+                    f"Box dimensions: w={r-l}, h={b-t}, area_ratio={area_ratio:.4f}, " 
+                    f"estimated_distance={estimated_distance:.2f}cm"
+                )
+                
+                # Handle target assignment and tracking
+                self.manage_target_tracking(tid, current_time)
+            
+            # Handle lost targets
+            self.cleanup_lost_targets(detected_ids, current_time)
+            
+        except Exception as e:
+            self.get_logger().error(f"Error processing frame: {str(e)}")
+            import traceback
+            self.get_logger().error(traceback.format_exc())
+
     def state_machine_callback(self):
         """Main state machine execution loop"""
+        # Try to get camera frame for states that need it
+        if self.current_state in [DroneState.SEARCHING, DroneState.TRACKING]:
+            # Make sure camera is initialized
+            if not self.camera_initialized:
+                if not self.initialize_camera():
+                    self.get_logger().warn("Camera not initialized, skipping frame processing")
+                    return
+                
+            # Get frame with appropriate error handling
+            try:
+                frame = self.tello_camera.get_frame()
+                frame_age = self.tello_camera.get_frame_age()
+                
+                if frame is None:
+                    self.get_logger().warn("No frame available")
+                elif frame_age > 1.0:
+                    self.get_logger().warn(f"Frame too old ({frame_age:.1f}s), skipping")
+                else:
+                    self.process_frame(frame)
+            except Exception as e:
+                self.get_logger().error(f"Error getting frame: {str(e)}")
+                # If we consistently fail to get frames, try reinitializing
+                if not self.camera_error:
+                    self.camera_initialized = False
+                    self.camera_error = True
+
         # Execute state-specific behaviors
         if self.current_state == DroneState.IDLE:
             # In IDLE state, wait for initialization command
@@ -294,6 +461,13 @@ class TelloStateMachine(Node):
                 # Set initial speed
                 self.tello.set_speed(50)
                 
+                # Initialize camera before searching
+                if not self.camera_initialized:
+                    if self.initialize_camera():
+                        self.get_logger().info("Camera initialized successfully")
+                    else:
+                        self.get_logger().warn("Camera initialization failed, continuing anyway")
+                
                 # Move to searching state
                 self.change_state(DroneState.SEARCHING)
             except Exception as e:
@@ -301,30 +475,12 @@ class TelloStateMachine(Node):
                 self.change_state(DroneState.IDLE)
             
         elif self.current_state == DroneState.SEARCHING:
-
-            # get frame
-            frame = self.tello_camera.get_frame()
-
-            # run yolo tracking - TODO
-            targets, status = yolo_tracking(frame)
-
-            # Check if any targets are detected (without waiting for assignment)
-            if self.targets:
-                # Simply take the first detected target
-                self.assigned_target_id = list(self.targets.keys())[0]
-                self.get_logger().info(f"Target {self.assigned_target_id} detected, tracking immediately")
+            # Execute search pattern even if frame processing fails
+            self.execute_search_pattern()
+            
+            # If we have an assignment, transition to tracking
+            if self.assigned_target_id is not None:
                 self.change_state(DroneState.TRACKING)
-            else:
-                # Continue searching if no targets found
-                self.execute_search_pattern()
-
-
-            # Search for targets if none assigned
-            # if self.assigned_target_id is None:
-            #     self.execute_search_pattern()
-            # else:
-            #     # If we have an assignment, transition to tracking
-            #     self.change_state(DroneState.TRACKING)
         
         elif self.current_state == DroneState.WAITING_FOR_ASSIGNMENT:
             # Wait for target assignment from prioritization module
@@ -340,13 +496,19 @@ class TelloStateMachine(Node):
                 self.change_state(DroneState.TRACKING)
         
         elif self.current_state == DroneState.TRACKING:
+            
             # Check if target is still visible
             if self.check_target_timeout():
+                self.get_logger().warn("Target lost, returning to search")
                 self.change_state(DroneState.SEARCHING)
                 return
-                
-            # Execute tracking behavior
-            self.execute_tracking()
+                    
+            # Execute tracking behavior if target exists
+            if self.assigned_target_id in self.targets:
+                self.execute_tracking()
+            else:
+                # Hover in place if target temporarily not visible
+                self.tello.send_rc_control(0, 0, 0, 0)
         
         elif self.current_state == DroneState.LANDING:
             # Execute landing procedure
@@ -367,10 +529,57 @@ class TelloStateMachine(Node):
             finally:
                 self.change_state(DroneState.IDLE)
     
+    def manage_target_tracking(self, tid, current_time):
+        """Manage target assignment and tracking persistence"""
+        # If already tracking this target, update last seen time
+        if self.assigned_target_id == tid:
+            self.target_last_seen = current_time
+            self.detection_persistence_count = self.min_detections_for_tracking  # Keep at max
+            return
+        
+        # If searching and no target assigned yet, consider this one
+        if self.current_state == DroneState.SEARCHING and self.assigned_target_id is None:
+            if self.potential_target_id is None or self.potential_target_id != tid:
+                # Start tracking a new potential target
+                self.potential_target_id = tid
+                self.detection_persistence_count = 1
+                self.get_logger().debug(f"New potential target ID {tid}, count: 1")
+            else:
+                # Same target detected again, increment counter
+                self.detection_persistence_count += 1
+                self.get_logger().debug(f"Potential target ID {tid}, count: {self.detection_persistence_count}")
+                
+                # Check if we've met the persistence threshold
+                if self.detection_persistence_count >= self.min_detections_for_tracking:
+                    self.assigned_target_id = tid
+                    self.target_last_seen = current_time
+                    self.get_logger().info(f"Target {tid} confirmed after {self.detection_persistence_count} detections, tracking now")
+
+    def cleanup_lost_targets(self, detected_ids, current_time):
+        """Clean up lost targets and handle persistence"""
+        # Reset persistence if the potential target disappeared
+        if self.potential_target_id is not None and self.potential_target_id not in detected_ids:
+            self.get_logger().debug(f"Potential target {self.potential_target_id} lost, resetting persistence")
+            self.potential_target_id = None
+            self.detection_persistence_count = 0
+        
+        # Remove old targets from dictionary (except current tracking target)
+        for tid in list(self.targets.keys()):
+            if tid not in detected_ids and current_time - self.targets[tid]['timestamp'] > 2.0:
+                if tid != self.assigned_target_id:  # Keep assigned target longer
+                    del self.targets[tid]
+
+                    
     def start_mission(self):
-        """Start the drone mission"""
         if self.current_state == DroneState.IDLE:
             self.get_logger().info("Starting mission")
+            
+            # Initialize camera here for early detection of issues
+            if self.initialize_camera():
+                self.get_logger().info("Camera initialized successfully")
+            else:
+                self.get_logger().warn("Camera initialization failed, continuing anyway")
+                
             self.change_state(DroneState.TAKEOFF)
     
     def abort_mission(self):
@@ -380,12 +589,22 @@ class TelloStateMachine(Node):
     
     def cleanup(self):
         """Clean up resources and land the drone"""
+        # Stop camera stream
+        if hasattr(self, 'tello_camera') and self.camera_initialized:
+            try:
+                self.tello_camera.stop()
+                self.camera_initialized = False
+            except Exception as e:
+                self.get_logger().error(f"Error stopping camera: {str(e)}")
+        
+        # Land the drone if flying
         if self.current_state not in [DroneState.IDLE, DroneState.LANDING]:
             try:
                 self.tello.land()
             except Exception:
                 self.get_logger().error("Failed to land drone during cleanup")
         
+        # End the Tello connection
         try:
             self.tello.end()
         except Exception:
