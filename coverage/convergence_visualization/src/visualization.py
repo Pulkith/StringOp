@@ -4,14 +4,14 @@ from matplotlib.collections import PatchCollection
 from matplotlib.patches import Polygon as MplPolygon
 from matplotlib import cm
 from matplotlib.colors import Normalize
-from src.entities import *
+from convergence_visualization.src.entities import *
 import random
 import os, io
 import numpy as np
 
 from scipy.spatial import Voronoi
-from src.voronoi_utils import clipped_voronoi_polygons_2d
-from src.planner import assign_voronoi_targets
+from convergence_visualization.src.voronoi_utils import clipped_voronoi_polygons_2d
+from convergence_visualization.src.planner import assign_voronoi_targets
 from shapely.geometry import Point
 from matplotlib.animation import FuncAnimation, PillowWriter, FFMpegWriter
 from matplotlib.collections import PatchCollection
@@ -19,9 +19,9 @@ from matplotlib.patches import Polygon as MplPolygon
 from matplotlib import cm
 from matplotlib.colors import Normalize
 from shapely.geometry import LineString
-from src.entities import Quadcopter, PointOfInterest, AreaOfInterest
-from src.voronoi_utils import clipped_voronoi_polygons_2d
-from src.planner import assign_voronoi_targets
+from convergence_visualization.src.entities import Quadcopter, PointOfInterest, AreaOfInterest
+from convergence_visualization.src.voronoi_utils import clipped_voronoi_polygons_2d
+from convergence_visualization.src.planner import assign_voronoi_targets
 
 # --- helper functions ---
 

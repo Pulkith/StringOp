@@ -4,6 +4,7 @@ from std_msgs.msg import String
 from tello_interfaces.msg import DroneStatus, DroneAction
 import numpy as np
 import pose_graph
+from convergence_visualization.simulations import weights_sim
 
 class DroneCoordinator(Node):
     def __init__(self):
@@ -21,9 +22,11 @@ class DroneCoordinator(Node):
         self.drone_action_pub = self.create_publisher(DroneAction, f'action', 10)
 
         self.get_logger().info("Drone Coordinator Node has been started.")
+
+        self.drones = []
+        self.counter = 0
         
     def drone_state_callback(self, msg):
-        
         # Process the drone state message
         data = msg.data
         drone_id = data.drone_id
@@ -60,14 +63,27 @@ class DroneCoordinator(Node):
             objects.append((object_pose, object_attributes))
 
         self.state.update_drone_objects(drone_id, objects)
+        self.counter += 1
 
-        if True:
-            msg = DroneAction()
-            msg.drone_id = drone_id
-            msg.object_id = 0
+        if self.counter % 5 == 0:
+            goals = weights_sim(
+                drone_positions=[
+                    (self.state.drones[drone_id].x, self.state.drones[drone_id].y)
+                    for drone_id in self.state.drones.keys()
+                ],
+                poi_positions=[
+                    (obj[0].x, obj[0].y)
+                    for obj in self.state.objects
+                ]
+            )
 
-            self.drone_action_pub.publish(msg)
-            self.get_logger().info(f"Updated state for {drone_id} with {len(objects)} objects.")
+            for index, goal in enumerate(goals):
+                msg = DroneAction()
+                msg.drone_id = drone_id
+                msg.object_id = goal
+
+                self.drone_action_pub.publish(msg)
+                self.get_logger().info(f"Updated state for {drone_id} with {len(objects)} objects.")
 
 
 def main(args=None):

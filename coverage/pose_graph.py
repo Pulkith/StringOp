@@ -33,7 +33,7 @@ cx, cy = 320, 240
 def score(a: ObjectAttributes, b: ObjectAttributes) -> float:
     # Calculate the score based on the distance and size difference
     size_diff = ((a.size_x - b.size_x) ** 2 + (a.size_y - b.size_y) ** 2) ** 0.5
-    color_diff = ((a.color[0] - b.color[0]) ** 2 + (a.color[1] - b.color[1]) ** 2 + (a.color[2] - b.color[2]) ** 2) ** 0.5
+    color_diff = ((a.r - b.r) ** 2 + (a.g - b.g) ** 2 + (a.b - b.b) ** 2) ** 0.5
     return 0.1*size_diff + 0.9*color_diff
 
 def dist(a: GlobalPose, b: GlobalPose) -> float:
