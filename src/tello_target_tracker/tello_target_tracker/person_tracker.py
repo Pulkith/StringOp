@@ -66,6 +66,29 @@ class PersonTracker:
                 if int(cls.item()) != 0:
                     continue
                 x1, y1, x2, y2 = map(int, box.tolist())
+                
+                # Ensure coordinates are properly ordered
+                if x2 < x1:
+                    x1, x2 = x2, x1
+                if y2 < y1:
+                    y1, y2 = y2, y1
+                
+                # Get original frame dimensions
+                orig_h, orig_w = frame.shape[:2]
+                # Get YOLO processing dimensions (from the log: 480x640)
+                yolo_h, yolo_w = 480, 640
+
+                # Scale factors
+                scale_x = orig_w / yolo_w
+                scale_y = orig_h / yolo_h
+
+                # Scale the coordinates back to original resolution
+                x1 = int(x1 * scale_x)
+                y1 = int(y1 * scale_y)
+                x2 = int(x2 * scale_x)
+                y2 = int(y2 * scale_y)
+
+                # Now use the properly ordered coordinates
                 roi = frame[y1:y2, x1:x2]
                 if roi.size == 0:
                     continue
