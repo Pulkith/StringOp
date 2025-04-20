@@ -327,15 +327,19 @@ class TelloStateMachine(Node):
             if frame is None or frame.size == 0:
                 self.get_logger().warn("Received empty frame, skipping processing")
                 return
-                
+                    
             # Log the frame shape
             self.get_logger().debug(f"Processing frame: {frame.shape}")
             
             # Run person detection
             person_tracks = self.person_tracker.process_frame(frame)
-            self.get_logger().debug(f"Detected {len(person_tracks)} persons")
+            # Add more detailed logging about detections
+            if person_tracks:
+                self.get_logger().info(f"Detected {len(person_tracks)} persons: {[tr['track_id'] for tr in person_tracks]}")
+            else:
+                self.get_logger().debug("No persons detected in frame")
             
-            # Create a visualization with more info
+            # # Create a visualization with more info
             # annotated_frame = frame.copy()
             # for track in person_tracks:
             #     l, t, r, b = track["bbox"]
@@ -412,6 +416,12 @@ class TelloStateMachine(Node):
             
             # Handle lost targets
             self.cleanup_lost_targets(detected_ids, current_time)
+            
+            # Add summary of current tracking state after processing
+            self.get_logger().info(f"Current state: {self.current_state.name}, " +
+                            f"Assigned target: {self.assigned_target_id}, " +
+                            f"Potential target: {self.potential_target_id}, " +
+                            f"Persistence: {self.detection_persistence_count}/{self.min_detections_for_tracking}")
             
         except Exception as e:
             self.get_logger().error(f"Error processing frame: {str(e)}")
@@ -535,33 +545,74 @@ class TelloStateMachine(Node):
         if self.assigned_target_id == tid:
             self.target_last_seen = current_time
             self.detection_persistence_count = self.min_detections_for_tracking  # Keep at max
+            self.get_logger().debug(f"Already tracking target {tid}, updated last_seen time")
             return
         
         # If searching and no target assigned yet, consider this one
         if self.current_state == DroneState.SEARCHING and self.assigned_target_id is None:
-            if self.potential_target_id is None or self.potential_target_id != tid:
+            # If this is the first detection or we're seeing a new target
+            if self.potential_target_id is None:
                 # Start tracking a new potential target
                 self.potential_target_id = tid
                 self.detection_persistence_count = 1
-                self.get_logger().debug(f"New potential target ID {tid}, count: 1")
+                self.get_logger().info(f"New potential target ID {tid}, detection count: 1")
+            # If we're seeing a different track ID but it's likely the same person (YOLO DeepSORT reidentification issue)
+            # This is the key change - we'll continue persistence even with different track IDs
             else:
-                # Same target detected again, increment counter
-                self.detection_persistence_count += 1
-                self.get_logger().debug(f"Potential target ID {tid}, count: {self.detection_persistence_count}")
+                # Check if the new detection is close to the previous potential target
+                if tid in self.targets and self.potential_target_id in self.targets:
+                    # Get positions
+                    new_pos = self.targets[tid]['position']
+                    old_pos = self.targets[self.potential_target_id]['position']
+                    
+                    # Calculate position difference
+                    dist_x = abs(new_pos.x - old_pos.x)
+                    dist_y = abs(new_pos.y - old_pos.y)
+                    
+                    # If within reasonable distance, consider it the same person
+                    if dist_x < 0.4 and dist_y < 0.4:  # Threshold can be adjusted
+                        self.get_logger().info(f"Track ID changed from {self.potential_target_id} to {tid} but appears to be same person")
+                        self.potential_target_id = tid  # Update to new ID
+                        self.detection_persistence_count += 1
+                        self.get_logger().info(f"Continuing with potential target ID {tid}, detection count: {self.detection_persistence_count}")
+                    else:
+                        # New person, restart persistence
+                        self.potential_target_id = tid
+                        self.detection_persistence_count = 1
+                        self.get_logger().info(f"Detected new person (ID {tid}), restarting persistence count: 1")
+                else:
+                    # Simple case - just update the ID and increment
+                    self.potential_target_id = tid
+                    self.detection_persistence_count += 1
+                    self.get_logger().info(f"Updated potential target to ID {tid}, detection count: {self.detection_persistence_count}")
                 
-                # Check if we've met the persistence threshold
-                if self.detection_persistence_count >= self.min_detections_for_tracking:
-                    self.assigned_target_id = tid
-                    self.target_last_seen = current_time
-                    self.get_logger().info(f"Target {tid} confirmed after {self.detection_persistence_count} detections, tracking now")
+            # Check if we've met the persistence threshold
+            if self.detection_persistence_count >= self.min_detections_for_tracking:
+                self.assigned_target_id = tid
+                self.target_last_seen = current_time
+                self.get_logger().info(f"Target {tid} confirmed after {self.detection_persistence_count} detections, transitioning to TRACKING")
+                # Force state change to tracking
+                self.change_state(DroneState.TRACKING)
+
 
     def cleanup_lost_targets(self, detected_ids, current_time):
-        """Clean up lost targets and handle persistence"""
-        # Reset persistence if the potential target disappeared
+        """Clean up lost targets and handle persistence, with improved logic for track ID changes"""
+        # Don't immediately reset potential target if it disappears momentarily
+        # Instead, give it a grace period to reappear with possibly a different ID
         if self.potential_target_id is not None and self.potential_target_id not in detected_ids:
-            self.get_logger().debug(f"Potential target {self.potential_target_id} lost, resetting persistence")
-            self.potential_target_id = None
-            self.detection_persistence_count = 0
+            # Check if we have this attribute, if not create it
+            if not hasattr(self, 'potential_target_last_seen'):
+                self.potential_target_last_seen = current_time
+                
+            # Only reset if the potential target has been missing for more than 1 second
+            if current_time - self.potential_target_last_seen > 1.0:
+                self.get_logger().debug(f"Potential target {self.potential_target_id} lost for >1s, resetting persistence")
+                self.potential_target_id = None
+                self.detection_persistence_count = 0
+        else:
+            # Update the last seen time for the potential target
+            if self.potential_target_id is not None:
+                self.potential_target_last_seen = current_time
         
         # Remove old targets from dictionary (except current tracking target)
         for tid in list(self.targets.keys()):
@@ -573,6 +624,10 @@ class TelloStateMachine(Node):
     def start_mission(self):
         if self.current_state == DroneState.IDLE:
             self.get_logger().info("Starting mission")
+            
+            # Set a lower detection persistence threshold to make it easier to track targets
+            self.min_detections_for_tracking = 3 
+            self.get_logger().info(f"Setting min_detections_for_tracking to {self.min_detections_for_tracking}")
             
             # Initialize camera here for early detection of issues
             if self.initialize_camera():
