@@ -37,7 +37,9 @@ class TelloStateMachine(Node):
         super().__init__('tello_state_machine')
         
         # Initialize parameters
+        # Initialize parameters
         self.drone_id = self.declare_parameter('drone_id', 0).value
+        self.net_interface = self.declare_parameter('net_interface', 'wlp4s0').value
         self.search_direction = 1  # 1 for clockwise, -1 for counter-clockwise
         self.target_lost_threshold = 5.0  # seconds
         
@@ -58,9 +60,11 @@ class TelloStateMachine(Node):
         self.camera_error = False
         self.last_camera_retry = 0
         self.camera_retry_interval = 5.0  # seconds
+        self.get_logger().info(f"{self.net_interface}")
+
         
         # Initialize Tello drone
-        self.tello = Tello()
+        self.tello = Tello(net=self.net_interface) # or wlp4s0
         self.person_tracker = PersonSegmentationTracker(
             seg_model_name="yolov8s-seg.pt",  # Using a small segmentation model
             conf_thresh=0.4,                   # Lower confidence for better recall
@@ -83,6 +87,9 @@ class TelloStateMachine(Node):
 
         self.connect_to_drone()
         
+
+        self.get_logger().info(f"Battery: {self.tello.get_battery()}%")
+        self.get_logger().info(f"Serial {self.tello.query_serial_number()}")
         # Create ROS publishers
         self.candidates_pub = self.create_publisher(
             DroneStatus, 

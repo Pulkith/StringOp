@@ -111,20 +111,21 @@ class Tello:
         self.retry_count = retry_count
         self.last_received_command_timestamp = time.time()
         self.last_rc_control_timestamp = time.time()
+        self.net = net
 
         if not threads_initialized:
             # Run Tello command responses UDP receiver on background
             client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             if net:
                 print("Using network interface: {}".format(net))
-                client_socket.setsockopt(socket.SOL_SOCKET, 25, net.encode())
+                client_socket.setsockopt(socket.SOL_SOCKET, 25, self.net.encode())
             client_socket.bind(("", Tello.CONTROL_UDP_PORT))
             response_receiver_thread = Thread(target=Tello.udp_response_receiver)
             response_receiver_thread.daemon = True
             response_receiver_thread.start()
 
             # Run state UDP receiver on background
-            state_receiver_thread = Thread(target=Tello.udp_state_receiver)
+            state_receiver_thread = Thread(target=Tello.udp_state_receiver, args=(self.net,))
             state_receiver_thread.daemon = True
             state_receiver_thread.start()
 
@@ -176,13 +177,14 @@ class Tello:
                 break
 
     @staticmethod
-    def udp_state_receiver():
+    def udp_state_receiver(net):
         """Setup state UDP receiver. This method listens for state information from
         Tello. Must be run from a background thread in order to not block
         the main thread.
         Internal method, you normally wouldn't call this yourself.
         """
         state_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        state_socket.setsockopt(socket.SOL_SOCKET, 25, net.encode())
         state_socket.bind(("", Tello.STATE_UDP_PORT))
 
         while True:
