@@ -11,7 +11,7 @@ from geometry_msgs.msg import Point, Twist, Vector3
 from tello_interfaces.msg import TargetInfo, DroneStatus
 
 from tello_target_tracker.camera_getter import TelloCamera
-from tello_target_tracker.person_tracker import PersonTracker
+from tello_target_tracker.person_tracker import PersonSegmentationTracker
 from std_srvs.srv import SetBool
 
 # Import the ROS visualization module
@@ -58,16 +58,20 @@ class TelloStateMachine(Node):
         
         # Initialize Tello drone
         self.tello = Tello()
-        self.person_tracker = PersonTracker(
-            conf_thresh=0.4,
-            color_filter=False  # Set to True if you want to filter by color
+        self.person_tracker = PersonSegmentationTracker(
+            seg_model_name="yolov8s-seg.pt",  # Using a small segmentation model
+            conf_thresh=0.4,                   # Lower confidence for better recall
+            uniform_thresh=0.3,                # Lower threshold for hue uniformity
+            mask_padding=15,                   # Padding around masks for bounding boxes
+            iou_thresh=0.3,                    # IoU threshold for track association
+            device=None                        # Auto-select device (CUDA, MPS, or CPU)
         )
         
         # Target acquisition parameters
-        self.min_detections_for_tracking = 3  # Reduce from 5 to make tracking faster
-        self.detection_persistence_count = 0
-        self.potential_target_id = None
-        
+        self.potential_targets = {}  # {target_id: persistence_count}
+        self.min_detections_for_tracking = 3  # Primary threshold for confirmed tracking
+        self.min_detections_for_candidates = 2  # Secondary threshold for candidate reporting
+            
         # Initialize the ROS visualizer
         self.visualizer = RosVisualizer(self, history_length=200)
 
@@ -258,46 +262,41 @@ class TelloStateMachine(Node):
         """Check if the tracked target has timed out and manage recovery phases"""
         if self.assigned_target_id is None:
             return False
-            
+                
         elapsed_time = time.time() - self.target_last_seen
         
-        # Target still visible recently
-        if elapsed_time < 1.0:
-            return False
-            
         # Short loss - hover in place and look around slightly
-        elif elapsed_time < 3.0:
+        if elapsed_time < 2.0:
             self.get_logger().debug(f"Target {self.assigned_target_id} briefly lost, hovering")
-            self.tello.send_rc_control(0, 0, 0, 10 * self.search_direction)
+            curr_z = self.tello.get_height()
+            error = self.target_height - curr_z
+            z_action = int(0.5 * error)
+
+            self.tello.send_rc_control(0, 0, z_action, 0)
             
             # Update the visualization
             self.visualizer.update_control_values(0, 0, 0, 10 * self.search_direction, time.time())
             
             return False
-            
-        # Medium loss - start turning in place to find target
-        elif elapsed_time < self.target_lost_threshold:
-            self.get_logger().debug(f"Target {self.assigned_target_id} lost for {elapsed_time:.1f}s, searching in place")
-            self.tello.send_rc_control(0, 0, 0, 20 * self.search_direction)
-            
-            # Update the visualization
-            self.visualizer.update_control_values(0, 0, 0, 20 * self.search_direction, time.time())
-            
-            return False
-            
+                
         # Long loss - target officially lost, return to searching state
         else:
             self.get_logger().warn(f"Target {self.assigned_target_id} lost for {elapsed_time:.1f}s! Returning to search.")
             self.assigned_target_id = None
-            self.potential_target_id = None
-            self.detection_persistence_count = 0
+            
+            # Clear potential targets when transitioning back to search
+            self.potential_targets.clear()  # Reset all potential targets
+            
             return True
     
     def execute_search_pattern(self):
         """Execute a search pattern to find targets"""
         # Use Tello's RC control for rotation search
         # Rotate in place to look for targets
-        self.tello.send_rc_control(0, 0, 0, 30 * self.search_direction)
+        curr_z = self.tello.get_height()
+        error = self.target_height - curr_z
+        z_action = int(0.5 * error)
+        self.tello.send_rc_control(0, 0, z_action, 30 * self.search_direction)
         
         # Update the visualization
         self.visualizer.update_control_values(0, 0, 0, 30 * self.search_direction, time.time())
@@ -332,17 +331,20 @@ class TelloStateMachine(Node):
         # Y axis control (left/right)
         # Use heading to center the target
         y_vel = int(max(min(-heading * 40, 30), -30))
-        
+        y_vel = 0
         # Z axis control (up/down)
         # Keep target centered vertically
         z_vel = int(max(min(height_offset * 30, 30), -30))
-        
+        z_vel = 0
         # Yaw control (rotation)
         # Turn to face target directly
         yaw_vel = int(max(min(heading * 60, 30), -30))
         
         # Send RC control command to Tello
-        self.tello.send_rc_control(y_vel, x_vel, z_vel, yaw_vel)
+        curr_z = self.tello.get_height()
+        error = self.target_height - curr_z
+        z_action = int(0.5 * error)
+        self.tello.send_rc_control(y_vel, x_vel, z_action, yaw_vel)
         
         # Update the visualization
         self.visualizer.update_control_values(y_vel, x_vel, z_vel, yaw_vel, time.time())
@@ -352,6 +354,7 @@ class TelloStateMachine(Node):
 
     def process_frame(self, frame):
         """Process camera frame to detect and track targets"""
+
         try:
             if frame is None or frame.size == 0:
                 self.get_logger().warn("Received empty frame, skipping processing")
@@ -360,9 +363,10 @@ class TelloStateMachine(Node):
             # Log the frame shape
             self.get_logger().debug(f"Processing frame: {frame.shape}")
             
-            # Run person detection
+            # Run person detection with the segmentation-based tracker
             person_tracks = self.person_tracker.process_frame(frame)
-            # Add more detailed logging about detections
+            
+            # Add detailed logging about detections
             if person_tracks:
                 self.get_logger().info(f"Detected {len(person_tracks)} persons: {[tr['track_id'] for tr in person_tracks]}")
             else:
@@ -379,6 +383,11 @@ class TelloStateMachine(Node):
                 tid = track["track_id"]
                 detected_ids.add(tid)
                 
+                # Validate bounding box dimensions
+                if r <= l or b <= t:
+                    self.get_logger().warn(f"Invalid bounding box for track {tid}: {(l,t,r,b)}. Skipping.")
+                    continue
+                    
                 # Calculate center point
                 cx = (l + r) / 2
                 cy = (t + b) / 2
@@ -387,23 +396,34 @@ class TelloStateMachine(Node):
                 rel_x = (cx - frame_width/2) / (frame_width/2)  # Left-right
                 rel_y = (cy - frame_height/2) / (frame_height/2)  # Up-down
                 
-                # Calculate heading (positive is right, negative is left)
-                heading = rel_x
+                
                 
                 # Calculate distance using bounding box area
-                # Second-order polynomial scaling (adjust coefficients based on calibration)
                 box_width = r - l
                 box_height = b - t
                 area = box_width * box_height
-                area_ratio = area / (frame_width * frame_height)
                 
-                # Simple second-order polynomial for distance estimation (in cm)
-                # distance = a*(area_ratio)^2 + b*(area_ratio) + c
-                # These coefficients should be calibrated for your drone and target size
-                a = 25000
-                b = -3500
-                c = 350
-                estimated_distance = a*(area_ratio**2) + b*area_ratio + c
+                # Protect against divide by zero
+                frame_area = frame_width * frame_height
+                if frame_area <= 0:
+                    self.get_logger().error("Invalid frame dimensions, skipping distance calculation")
+                    continue
+                    
+                area_ratio = area / frame_area
+                
+                # Log area calculation for debugging
+                self.get_logger().debug(f"Area calculation: box={area}, frame={frame_area}, ratio={area_ratio:.6f}")
+                
+                # Second-order polynomial for distance estimation (in cm)
+                # a_x = 25000
+                # b_x = -3500
+                # c_x = 350
+
+                # 50% - 150
+                # 25% - 250
+                a_x = -400
+                b_x = 350
+                estimated_distance =  a_x * area_ratio + b_x
                 
                 # Clamp the distance to reasonable values (in cm)
                 estimated_distance = max(50, min(500, estimated_distance))
@@ -411,6 +431,9 @@ class TelloStateMachine(Node):
                 # Normalize for our -1 to 1 scale
                 rel_z = (estimated_distance - 50) / 450  # Maps 50cm->0.0, 500cm->1.0
                 
+                # Calculate heading (positive is right, negative is left)
+                heading = rel_x
+
                 # Update target information
                 self.targets[tid] = {
                     'position': Point(x=rel_x, y=rel_y, z=rel_z),
@@ -422,8 +445,8 @@ class TelloStateMachine(Node):
                 }
                 
                 self.get_logger().debug(
-                    f"Box dimensions: w={r-l}, h={b-t}, area_ratio={area_ratio:.4f}, " 
-                    f"estimated_distance={estimated_distance:.2f}cm"
+                    f"Track {tid}: box=({l},{t},{r},{b}), w={box_width}, h={box_height}, " 
+                    f"area_ratio={area_ratio:.4f}, distance={estimated_distance:.2f}cm"
                 )
                 
                 # Handle target assignment and tracking
@@ -433,25 +456,46 @@ class TelloStateMachine(Node):
             self.cleanup_lost_targets(detected_ids, current_time)
             
             # Create annotated frame for visualization
-            annotated_frame = draw_tracking_status(
-                frame, 
-                self.current_state.name, 
-                self.assigned_target_id,
-                self.potential_target_id,
-                self.detection_persistence_count,
-                self.min_detections_for_tracking,
-                self.targets
-            )
+            # Use the segmentation tracker's built-in visualization if available
+            if hasattr(self.person_tracker, 'draw_tracks'):
+                # First create standard status visualization
+                base_frame = draw_tracking_status(
+                    frame, 
+                    self.current_state.name, 
+                    self.assigned_target_id,
+                    self.potential_targets,  # Replaced potential_target_id with potential_targets dictionary
+                    self.min_detections_for_tracking,
+                    self.targets
+                )
+                
+                if base_frame is not None:
+                    # Then add segmentation tracker's visualization elements if desired
+                    annotated_frame = base_frame
+                else:
+                    annotated_frame = None
+            else:
+                # Fall back to the standard visualization
+                annotated_frame = draw_tracking_status(
+                    frame, 
+                    self.current_state.name, 
+                    self.assigned_target_id,
+                    self.potential_targets,  # Replaced potential_target_id with potential_targets dictionary
+                    self.min_detections_for_tracking,
+                    self.targets
+                )
+
             
             # Update the visualization
             if annotated_frame is not None:
                 self.visualizer.update_frame(annotated_frame)
             
-            # Add summary of current tracking state after processing
-            self.get_logger().info(f"Current state: {self.current_state.name}, " +
-                            f"Assigned target: {self.assigned_target_id}, " +
-                            f"Potential target: {self.potential_target_id}, " +
-                            f"Persistence: {self.detection_persistence_count}/{self.min_detections_for_tracking}")
+            # Add summary of current tracking state
+            self.get_logger().info(
+                f"State: {self.current_state.name}, "
+                f"Target: {self.assigned_target_id}, "
+                f"Potentials: {', '.join([f'{tid}:{count}' for tid, count in self.potential_targets.items()])}, "
+                f"Min threshold: {self.min_detections_for_tracking}"
+            )
             
         except Exception as e:
             self.get_logger().error(f"Error processing frame: {str(e)}")
@@ -472,6 +516,8 @@ class TelloStateMachine(Node):
             try:
                 frame = self.tello_camera.get_frame()
                 frame_age = self.tello_camera.get_frame_age()
+
+                # convert to rgb
                 
                 if frame is None:
                     self.get_logger().warn("No frame available")
@@ -525,7 +571,11 @@ class TelloStateMachine(Node):
         elif self.current_state == DroneState.WAITING_FOR_ASSIGNMENT:
             # Wait for target assignment from prioritization module
             # Hover in place
-            self.tello.send_rc_control(0, 0, 0, 0)
+            curr_z = self.tello.get_height()
+            error = self.target_height - curr_z
+            z_action = int(0.5 * error)
+
+            self.tello.send_rc_control(0, 0, z_action, 0)
             
             # Update visualization
             self.visualizer.update_control_values(0, 0, 0, 0, time.time())
@@ -551,7 +601,11 @@ class TelloStateMachine(Node):
                 self.execute_tracking()
             else:
                 # Hover in place if target temporarily not visible
-                self.tello.send_rc_control(0, 0, 0, 0)
+                curr_z = self.tello.get_height()
+                error = self.target_height - curr_z
+                z_action = int(0.5 * error)
+
+                self.tello.send_rc_control(0, 0, z_action, 0)
                 
                 # Update visualization
                 self.visualizer.update_control_values(0, 0, 0, 0, time.time())
@@ -576,80 +630,138 @@ class TelloStateMachine(Node):
                 self.change_state(DroneState.IDLE)
     
     def manage_target_tracking(self, tid, current_time):
-        """Manage target assignment and tracking persistence"""
+        """
+        Manage target assignment and tracking persistence with multiple candidates.
+        Maintains a dictionary of potential targets with their persistence counts.
+        """
         # If already tracking this target, update last seen time
         if self.assigned_target_id == tid:
             self.target_last_seen = current_time
-            self.detection_persistence_count = self.min_detections_for_tracking  # Keep at max
+            if tid in self.potential_targets:
+                self.potential_targets[tid] = self.min_detections_for_tracking  # Keep at max
             self.get_logger().debug(f"Already tracking target {tid}, updated last_seen time")
             return
         
-        # If searching and no target assigned yet, consider this one
+        # For unassigned targets during SEARCHING state
         if self.current_state == DroneState.SEARCHING and self.assigned_target_id is None:
-            # If this is the first detection or we're seeing a new target
-            if self.potential_target_id is None:
-                # Start tracking a new potential target
-                self.potential_target_id = tid
-                self.detection_persistence_count = 1
-                self.get_logger().info(f"New potential target ID {tid}, detection count: 1")
-            # If we're seeing a different track ID but it's likely the same person (YOLO DeepSORT reidentification issue)
-            # This is the key change - we'll continue persistence even with different track IDs
+            # Check if this ID is already in our potential targets
+            if tid in self.potential_targets:
+                # Increment persistence for existing target
+                self.potential_targets[tid] += 1
+                self.get_logger().info(f"Incremented potential target ID {tid}, count: {self.potential_targets[tid]}")
             else:
-                # Check if the new detection is close to the previous potential target
-                if tid in self.targets and self.potential_target_id in self.targets:
-                    # Get positions
-                    new_pos = self.targets[tid]['position']
-                    old_pos = self.targets[self.potential_target_id]['position']
-                    
-                    # Calculate position difference
-                    dist_x = abs(new_pos.x - old_pos.x)
-                    dist_y = abs(new_pos.y - old_pos.y)
-                    
-                    # If within reasonable distance, consider it the same person
-                    if dist_x < 0.4 and dist_y < 0.4:  # Threshold can be adjusted
-                        self.get_logger().info(f"Track ID changed from {self.potential_target_id} to {tid} but appears to be same person")
-                        self.potential_target_id = tid  # Update to new ID
-                        self.detection_persistence_count += 1
-                        self.get_logger().info(f"Continuing with potential target ID {tid}, detection count: {self.detection_persistence_count}")
-                    else:
-                        # New person, restart persistence
-                        self.potential_target_id = tid
-                        self.detection_persistence_count = 1
-                        self.get_logger().info(f"Detected new person (ID {tid}), restarting persistence count: 1")
-                else:
-                    # Simple case - just update the ID and increment
-                    self.potential_target_id = tid
-                    self.detection_persistence_count += 1
-                    self.get_logger().info(f"Updated potential target to ID {tid}, detection count: {self.detection_persistence_count}")
-                
-            # Check if we've met the persistence threshold
-            if self.detection_persistence_count >= self.min_detections_for_tracking:
-                self.assigned_target_id = tid
+                # Start tracking a new potential target
+                self.potential_targets[tid] = 1
+                self.get_logger().info(f"Added new potential target ID {tid}, count: 1")
+            
+            # Check for targets that might be the same person with different IDs
+            self._handle_similar_targets(tid)
+            
+            # Check if we've met the primary persistence threshold for any target
+            max_tid = self._get_highest_persistence_target()
+            if max_tid is not None and self.potential_targets[max_tid] >= self.min_detections_for_tracking:
+                self.assigned_target_id = max_tid
                 self.target_last_seen = current_time
-                self.get_logger().info(f"Target {tid} confirmed after {self.detection_persistence_count} detections, transitioning to TRACKING")
+                self.get_logger().info(f"Target {max_tid} confirmed with {self.potential_targets[max_tid]} detections, transitioning to TRACKING")
                 # Force state change to tracking
                 self.change_state(DroneState.TRACKING)
+                
+                # Optionally, report all candidates that meet secondary threshold
+                candidates = self._get_viable_candidates()
+                if candidates:
+                    candidate_str = ';'.join([f"{tid}:{count}" for tid, count in candidates])
+                    self.get_logger().info(f"Viable candidates: {candidate_str}")
+                    # Here you would publish a message with these candidates
+                    self.publish_candidate_targets(candidates)
+
+    def _handle_similar_targets(self, current_tid):
+        """
+        Check if the current target is likely the same person as another tracked target
+        with a different ID, and merge them if necessary.
+        """
+        if current_tid not in self.targets:
+            return
+            
+        current_pos = self.targets[current_tid]['position']
+        
+        # Check all other potential targets
+        for other_tid in list(self.potential_targets.keys()):
+            if other_tid == current_tid or other_tid not in self.targets:
+                continue
+                
+            other_pos = self.targets[other_tid]['position']
+            
+            # Calculate position difference
+            dist_x = abs(current_pos.x - other_pos.x)
+            dist_y = abs(current_pos.y - other_pos.y)
+            
+            # If targets are very close to each other, they're likely the same person
+            if dist_x < 0.3 and dist_y < 0.3:  # Adjusted threshold
+                self.get_logger().info(f"Merging targets {other_tid} and {current_tid} as they appear to be the same person")
+                
+                # Merge persistence counts to the current target
+                merged_count = self.potential_targets[other_tid] + self.potential_targets[current_tid]
+                self.potential_targets[current_tid] = merged_count
+                # Remove the other target
+                del self.potential_targets[other_tid]
+                
+                # Log the merge
+                self.get_logger().info(f"Merged target now has persistence count: {merged_count}")
+                break
+
+    def _get_highest_persistence_target(self):
+        """
+        Get the target ID with the highest persistence count.
+        Returns None if no targets exist.
+        """
+        if not self.potential_targets:
+            return None
+            
+        return max(self.potential_targets, key=self.potential_targets.get)
+        
+    def _get_viable_candidates(self):
+        """
+        Get all targets that meet the secondary persistence threshold.
+        Returns a list of (tid, count) tuples sorted by count (highest first).
+        """
+        candidates = [(tid, count) for tid, count in self.potential_targets.items() 
+                    if count >= self.min_detections_for_candidates]
+        return sorted(candidates, key=lambda x: x[1], reverse=True)
 
     def cleanup_lost_targets(self, detected_ids, current_time):
-        """Clean up lost targets and handle persistence, with improved logic for track ID changes"""
-        # Don't immediately reset potential target if it disappears momentarily
-        # Instead, give it a grace period to reappear with possibly a different ID
-        if self.potential_target_id is not None and self.potential_target_id not in detected_ids:
-            # Check if we have this attribute, if not create it
-            if not hasattr(self, 'potential_target_last_seen'):
-                self.potential_target_last_seen = current_time
-                
-            # Only reset if the potential target has been missing for more than 1 second
-            if current_time - self.potential_target_last_seen > 1.0:
-                self.get_logger().debug(f"Potential target {self.potential_target_id} lost for >1s, resetting persistence")
-                self.potential_target_id = None
-                self.detection_persistence_count = 0
-        else:
-            # Update the last seen time for the potential target
-            if self.potential_target_id is not None:
-                self.potential_target_last_seen = current_time
+        """
+        Clean up lost targets from the potential targets dictionary.
+        """
+        # Keep track of targets that need to be removed
+        to_remove = []
         
-        # Remove old targets from dictionary (except current tracking target)
+        # Check each potential target
+        for tid in self.potential_targets:
+            if tid not in detected_ids:
+                # Check if we have last seen timestamps for each target
+                if not hasattr(self, 'target_last_seen_times'):
+                    self.target_last_seen_times = {}
+                    
+                # Initialize timestamp if not exists
+                if tid not in self.target_last_seen_times:
+                    self.target_last_seen_times[tid] = current_time
+                    
+                # Only remove if the target has been missing for more than 1 second
+                if current_time - self.target_last_seen_times[tid] > 1.0:
+                    self.get_logger().debug(f"Potential target {tid} lost for >1s, removing")
+                    to_remove.append(tid)
+            else:
+                # Update timestamp for seen targets
+                if hasattr(self, 'target_last_seen_times'):
+                    self.target_last_seen_times[tid] = current_time
+        
+        # Remove lost targets
+        for tid in to_remove:
+            del self.potential_targets[tid]
+            if hasattr(self, 'target_last_seen_times') and tid in self.target_last_seen_times:
+                del self.target_last_seen_times[tid]
+        
+        # Remove old targets from the main targets dictionary (except current tracking target)
         for tid in list(self.targets.keys()):
             if tid not in detected_ids and current_time - self.targets[tid]['timestamp'] > 2.0:
                 if tid != self.assigned_target_id:  # Keep assigned target longer
