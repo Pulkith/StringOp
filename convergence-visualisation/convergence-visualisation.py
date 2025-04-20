@@ -246,11 +246,12 @@ def generate_random_position(bounds):
     return np.random.uniform(0, bounds[0]), np.random.uniform(0, bounds[1])
 
 def simulate(bounds, num_steps=50, step_size=1.0, gif_filename="voronoi_simulation.gif"):
-    num_quad, num_fw, num_pois = 3, 0, 2
+    num_quad, num_fw, num_pois = 3, 0, 10
     drones = [Quadcopter(generate_random_position(bounds)) for _ in range(num_quad)]
     pois = [PointOfInterest(generate_random_position(bounds)) for _ in range(num_pois)]
 
-    assign_voronoi_targets(drones, pois, bounds)
+    # assign_voronoi_targets(drones, pois, bounds)  # Initial static frame
+
     draw_static(drones, pois, bounds, "voronoi_initial.png")
 
     fig, ax = plt.subplots(figsize=(16, 9))
@@ -260,13 +261,17 @@ def simulate(bounds, num_steps=50, step_size=1.0, gif_filename="voronoi_simulati
     ax.set_autoscale_on(False)
 
     def update(frame):
+        # Recompute regions, centers, and targets each step
+        assign_voronoi_targets(drones, pois, bounds)
+
+        # Move drones towards their current target (region center if no POIs)
         for drone in drones:
             if isinstance(drone, Quadcopter):
-                # Always move towards the assigned target (region center if no POIs)
-                start = drone.target
-                if start is not None:
-                    drone.move_towards(start, step_size)
-        draw_scene(ax, drones, pois, bounds, show_voronoi=False, use_custom_voronoi=False)
+                if drone.target is not None:
+                    drone.move_towards(drone.target, step_size)
+
+        # Redraw the scene with updated regions and targets
+        draw_scene(ax, drones, pois, bounds)
 
     anim = FuncAnimation(fig, update, frames=num_steps, interval=200)
     anim.save(gif_filename, dpi=80, writer=PillowWriter(fps=5))
