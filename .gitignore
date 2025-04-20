@@ -1,1 +1,31 @@
+# ROS 2 build folders
+build/
+install/
+log/
+
+# ROS 2 workspace-level files
 *.log
+*.pyc
+*.swp
+*.swo
+
+# CMake-related
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Colcon metadata
+.colcon/
+
+# VSCode or JetBrains settings (if you're using them)
+.vscode/
+.idea/
+
+# Python virtual environments
+venv/
+env/
+
+# Misc
+*.bak
+*.DS_Store

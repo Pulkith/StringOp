@@ -2,7 +2,7 @@
 
 # Define variables
 IMAGE_NAME="osrf/ros:foxy-desktop"  # Replace with your image name
-HOST_DIR="/home/anoca/repos" # Host directory to mount
+HOST_DIR="/home/ben" # Host directory to mount
 CONTAINER_DIR="/home/ros2_user/" # Directory inside container
 USER_NAME="ros2_user"         # Non-root user name
 USER_ID=$(id -u)              # Host user ID
