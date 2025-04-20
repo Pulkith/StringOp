@@ -137,14 +137,47 @@ def draw_scene(ax, drones, pois, aois, bounds,
 
 
 # --- Drawing Utilities ---
-def draw_static(drones, pois, aois, bounds, filename, assignments=None, streamlit_display=False):
+def draw_static(drones, pois, aois, bounds, filename=None, assignments=None, streamlit_display=False):
+    """
+    Draw the static configuration of drones, POIs, and AOIs.
+    """
     fig, ax = plt.subplots(figsize=(16, 9))
     ax.set_xlim(0, bounds[0])
     ax.set_ylim(0, bounds[1])
-    draw_scene(ax, drones, pois, aois, bounds, assignments, show_voronoi=True, use_custom_voronoi=False)
-    ax.set_title("Initial Configuration of Drones and POIs")
+    ax.set_aspect('equal')
+
+    # Draw drones
+    for drone in drones:
+        color = 'green' if drone.alive else 'gray'
+        ax.scatter(*drone.position, color=color, s=50, label='Drone' if 'Drone' not in ax.get_legend_handles_labels()[1] else "")
+
+    # Draw POIs
+    for poi in pois:
+        ax.scatter(*poi.position, color='red', s=50, label='POI' if 'POI' not in ax.get_legend_handles_labels()[1] else "")
+        
+        # Draw direction arrow and annotate speed for moving POIs
+        if poi.moving:
+            arrow_length = 5.0 * poi.speed  # Arrow length proportional to speed
+            dx = arrow_length * np.cos(poi.direction)
+            dy = arrow_length * np.sin(poi.direction)
+            ax.arrow(
+                poi.position[0], poi.position[1], dx, dy,
+                head_width=2.0, head_length=2.0, fc='blue', ec='blue'
+            )
+            # Annotate speed near the arrow
+            ax.text(
+                poi.position[0] + dx / 2, poi.position[1] + dy / 2,
+                f"{poi.speed:.1f}", color='blue', fontsize=8, ha='center'
+            )
+
+    # Draw AOIs
+    for aoi in aois:
+        polygon = MplPolygon(aoi["coords"], closed=True, edgecolor='magenta', fill=False, linewidth=2)
+        ax.add_patch(polygon)
+
+    ax.set_title("Static Configuration of Drones, POIs, and AOIs")
     plt.tight_layout()
-    
+
     if streamlit_display:
         import streamlit as st
         st.pyplot(fig)
@@ -249,12 +282,15 @@ def animate_simulation(drones, pois, aois, bounds, results_dir, num_steps=200, s
     ax.set_autoscale_on(False)
 
     def update(frame):
+        # Move POIs
+        for poi in pois:
+            poi.move(bounds)
+
         # Check for drone 'deaths'
         for drone in drones:
             if drone.alive and random.random() < drone.death_prob and len([d for d in drones if d.alive]) > 3:
                 drone.alive = False
 
-        
         # Assign Voronoi targets
         points = np.array([drone.position for drone in drones if drone.alive])
         if len(points) > 0:  # Ensure there are points to create a Voronoi diagram
@@ -278,7 +314,6 @@ def animate_simulation(drones, pois, aois, bounds, results_dir, num_steps=200, s
     plt.close()
 
     if streamlit_display:
-        # show the GIF in Streamlit
+        # Show the GIF in Streamlit
         import streamlit as st
         st.image(gif_path, caption="Simulation Animation")
-        
