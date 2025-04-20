@@ -1,16 +1,61 @@
-# voronoi_drones_plot.py
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.spatial import Voronoi, voronoi_plot_2d, QhullError
+import matplotlib.lines as mlines
+from scipy.spatial import Voronoi, QhullError
 from scipy.optimize import linear_sum_assignment
 from matplotlib.animation import FuncAnimation, PillowWriter
-from matplotlib.collections import LineCollection
+from matplotlib.collections import LineCollection, PatchCollection
+from matplotlib.patches import Polygon as MplPolygon
+from shapely.geometry import Polygon, Point, box
+from shapely.ops import unary_union, split
+import uuid
 
+def clipped_voronoi_polygons_2d(vor, bounds):
+    from shapely.geometry import LineString
+
+    # Create the bounding box polygon
+    min_x, min_y = 0, 0
+    max_x, max_y = bounds
+    bbox_poly = box(min_x, min_y, max_x, max_y)
+
+    regions = []
+    for i, point in enumerate(vor.points):
+        # Start with full bounding box
+        region = bbox_poly
+        # Clip by each bisector
+        for j, other in enumerate(vor.points):
+            if i == j:
+                continue
+            # Compute midpoint and direction of perpendicular bisector
+            mid = (point + other) / 2
+            direction = other - point
+            # Normal vector (perpendicular to direction)
+            normal = np.array([direction[1], -direction[0]])
+            normal = normal / np.linalg.norm(normal)
+            # Create a long line along the bisector
+            L = max(bounds) * 2
+            line_coords = [mid + normal * L, mid - normal * L]
+            bisector = LineString(line_coords)
+            # Split and keep the side containing the original point
+            pieces = split(region, bisector)
+            # Select the piece that contains the site
+            for poly in pieces.geoms:
+                if poly.contains(Point(point)) or poly.touches(Point(point)):
+                    region = poly
+                    break
+        # Final region clipped
+        regions.append(region)
+    return regions
 
 # --- Entities ---
 class Drone:
     def __init__(self, position):
         self.position = np.array(position)
+        self.id = str(uuid.uuid4())
+        self.target = None
+        self.region_polygon = None
+        self.center_point = None
+        self.targets_in_region = []
 
 class Quadcopter(Drone):
     def __init__(self, position):
@@ -30,11 +75,14 @@ class FixedWing(Drone):
 class PointOfInterest:
     def __init__(self, position):
         self.position = np.array(position)
+        self.id = str(uuid.uuid4())
 
 # --- Visualization ---
-def draw_scene(ax, drones, pois, bounds, assignments=None, show_voronoi=False):
+def draw_scene(ax, drones, pois, bounds,
+               assignments=None,
+               show_voronoi=False,
+               use_custom_voronoi=False):
     ax.cla()
-
     ax.set_xlabel("X (meters)")
     ax.set_ylabel("Y (meters)")
     ax.grid(True, linestyle='--', linewidth=0.5, alpha=0.7)
@@ -44,78 +92,109 @@ def draw_scene(ax, drones, pois, bounds, assignments=None, show_voronoi=False):
     ax.set_autoscale_on(False)
     ax.plot(*create_rectangle_marker(bounds), color='black', linewidth=2)
 
+    # Draw clipped Voronoi polygons
+    patches = []
+    for drone in drones:
+        if isinstance(drone, Quadcopter) and drone.region_polygon is not None:
+            coords = np.array(drone.region_polygon.exterior.coords)
+            patch = MplPolygon(coords, closed=True)
+            patches.append(patch)
+    if patches:
+        ax.add_collection(PatchCollection(
+            patches,
+            facecolor='lightblue',
+            edgecolor='blue',
+            linewidth=1,
+            alpha=0.2
+        ))
+
+    # Draw movement & indicator lines
+    for drone in drones:
+        if isinstance(drone, Quadcopter):
+            # if no target, fly to center_point (orange star)
+            start = drone.target if drone.target is not None else drone.center_point
+            if start is not None:
+                ax.plot(
+                    [drone.position[0], start[0]],
+                    [drone.position[1], start[1]],
+                    color='blue', linewidth=1.5
+                )
+            # if multiple POIs in region, dashed grey from target (green star) to each
+            if drone.target is not None and len(drone.targets_in_region) > 1:
+                for poi_pos in drone.targets_in_region:
+                    ax.plot(
+                        [drone.target[0], poi_pos[0]],
+                        [drone.target[1], poi_pos[1]],
+                        linestyle='--', color='gray', linewidth=1
+                    )
+
+    # Draw drones, centers, targets, POIs
     scale = min(bounds) / 20
-    drone_positions = [drone.position for drone in drones]
-
-    if len(drone_positions) >= 3:
-        arr = np.vstack(drone_positions)
-        if np.linalg.matrix_rank(arr - arr[0]) > 1:
-            plot_voronoi(ax, arr, bounds)
-
     for drone in drones:
         if isinstance(drone, Quadcopter):
             ax.scatter(*drone.position, marker='x', color='black', s=100 * scale)
-        elif isinstance(drone, FixedWing):
+            if drone.center_point is not None:
+                ax.scatter(*drone.center_point, marker='*', color='orange', s=60)
+            if drone.target is not None:
+                ax.scatter(*drone.target, marker='*', color='green', s=100)
+        else:  # FixedWing
             triangle = create_triangle_marker(drone.position, drone.heading, size=scale)
             ax.plot(*triangle, color='black')
-
-    if show_voronoi:
-        try:
-            if len(drone_positions) >= 3:
-                arr = np.vstack(drone_positions)
-                if np.linalg.matrix_rank(arr - arr[0]) > 1:
-                    vor = Voronoi(arr)
-                    voronoi_plot_2d(vor, ax=ax, show_vertices=False,
-                                    line_colors='gray', line_width=1, line_alpha=0.6, point_size=0)
-        except QhullError:
-            print("[WARNING] Voronoi computation failed — likely due to degenerate geometry.")
 
     for poi in pois:
         ax.scatter(*poi.position, color='red', s=40)
 
-    if assignments:
-        for i, j in assignments:
-            p1, p2 = drones[i].position, pois[j].position
-            ax.plot([p1[0], p2[0]], [p1[1], p2[1]], linestyle=':', color='lightblue', linewidth=1.5)
+    # Legend (applies to both static and animation)
+    drone_handle      = mlines.Line2D([], [], color='black', marker='x', linestyle='None', markersize=8, label='Quadcopter')
+    poi_handle        = mlines.Line2D([], [], color='red',   marker='o', linestyle='None', markersize=6, label='POI')
+    target_handle     = mlines.Line2D([], [], color='green', marker='*', linestyle='None', markersize=10, label='Target')
+    center_handle     = mlines.Line2D([], [], color='orange',marker='*', linestyle='None', markersize=8, label='Region Center')
+    goal_line_handle  = mlines.Line2D([], [], color='blue',  linewidth=1.5,           label='Goal Line')
+    link_line_handle  = mlines.Line2D([], [], color='gray',  linestyle='--', linewidth=1, label='POI Links')
+    ax.legend(
+        handles=[
+            drone_handle,
+            poi_handle,
+            target_handle,
+            center_handle,
+            goal_line_handle,
+            link_line_handle
+        ],
+        loc='upper right'
+    )
 
-    ax.set_title("Drones Moving to Assigned POIs")
+    ax.set_title("Drones Moving to POI Region Centers")
 
 # --- Drawing Utilities ---
 def draw_static(drones, pois, bounds, filename, assignments=None):
     fig, ax = plt.subplots(figsize=(16, 9))
     ax.set_xlim(0, bounds[0])
     ax.set_ylim(0, bounds[1])
-    draw_scene(ax, drones, pois, bounds, assignments)
-    ax.set_title("Final Positions of Drones and POIs")
+    draw_scene(ax, drones, pois, bounds, assignments, show_voronoi=True, use_custom_voronoi=False)
+    ax.set_title("Initial Configuration of Drones and POIs")
     plt.tight_layout()
     plt.savefig(filename, dpi=300)
     plt.close()
 
-def plot_voronoi(ax, points, bounds, extension=1e3):
-    try:
-        vor = Voronoi(points)
-        segments = []
-
-        center = points.mean(axis=0)
-        for (pointidx, simplex) in zip(vor.ridge_points, vor.ridge_vertices):
-            simplex = np.asarray(simplex)
-            if np.any(simplex < 0):
-                i, j = pointidx
-                t = points[j] - points[i]  # tangent
-                t = t / np.linalg.norm(t)
-                n = np.array([-t[1], t[0]])  # normal
-
-                midpoint = (points[i] + points[j]) / 2
-                far_point = midpoint + n * extension
-                segments.append([midpoint, far_point])
-            else:
-                p1, p2 = vor.vertices[simplex]
-                segments.append([p1, p2])
-
-        line_collection = LineCollection(segments, colors='blue', linewidths=1, alpha=0.6)
-        ax.add_collection(line_collection)
-    except QhullError:
-        print("[WARNING] Voronoi computation failed — likely due to degenerate geometry.")
+def plot_voronoi_polygons(ax, points, bounds):
+    bbox = box(0, 0, bounds[0], bounds[1])
+    vor = Voronoi(points)
+    patches = []
+    for region_index in vor.point_region:
+        region = vor.regions[region_index]
+        if -1 in region or len(region) == 0:
+            continue
+        poly_coords = vor.vertices[region]
+        try:
+            poly = Polygon(poly_coords).intersection(bbox)
+            if poly.is_valid and not poly.is_empty:
+                mpl_poly = MplPolygon(np.array(poly.exterior.coords), closed=True)
+                patches.append(mpl_poly)
+        except:
+            continue
+    if patches:
+        patch_collection = PatchCollection(patches, facecolor='none', edgecolor='blue', linewidth=1, alpha=0.6)
+        ax.add_collection(patch_collection)
 
 def create_rectangle_marker(bounds):
     x = [0, 0, bounds[0], bounds[0], 0]
@@ -135,31 +214,44 @@ def create_triangle_marker(position, heading, size=5):
     y = [front[1], left[1], right[1], front[1]]
     return x, y
 
-# --- Matching Logic ---
-def assignment_cost(drones, pois):
-    cost_matrix = np.zeros((len(drones), len(pois)))
-    for i, drone in enumerate(drones):
-        for j, poi in enumerate(pois):
-            cost_matrix[i, j] = np.linalg.norm(drone.position - poi.position)
-    return cost_matrix
+# --- Region Targets ---
+def assign_voronoi_targets(drones, pois, bounds):
+    points = np.vstack([drone.position for drone in drones])
+    vor = Voronoi(points)
+    bbox = box(0, 0, bounds[0], bounds[1])
 
-def compute_assignments(drones, pois):
-    cost = assignment_cost(drones, pois)
-    row_ind, col_ind = linear_sum_assignment(cost)
-    return list(zip(row_ind, col_ind))
+    clipped_regions = clipped_voronoi_polygons_2d(vor, bounds)
+    for i, drone in enumerate(drones):
+        drone.center_point = None
+        drone.region_polygon = None
+        drone.target = None
+
+        if i >= len(clipped_regions):
+            continue
+
+        poly = clipped_regions[i]
+        drone.region_polygon = poly
+        drone.center_point = np.array(poly.centroid.coords[0])
+
+        points_in_region = [poi.position for poi in pois if poly.covers(Point(poi.position))]
+        drone.targets_in_region = points_in_region
+        if points_in_region:
+            drone.target = np.mean(points_in_region, axis=0)
+        else:
+            # No POIs in region: move to center of the region polygon
+            drone.target = drone.center_point
 
 # --- Main Simulation ---
 def generate_random_position(bounds):
     return np.random.uniform(0, bounds[0]), np.random.uniform(0, bounds[1])
 
 def simulate(bounds, num_steps=50, step_size=1.0, gif_filename="voronoi_simulation.gif"):
-    num_quad, num_fw, num_pois = 3, 0, 3
+    num_quad, num_fw, num_pois = 3, 0, 2
     drones = [Quadcopter(generate_random_position(bounds)) for _ in range(num_quad)]
     pois = [PointOfInterest(generate_random_position(bounds)) for _ in range(num_pois)]
 
-    assignments = compute_assignments(drones, pois)
-
-    draw_static(drones, pois, bounds, "voronoi_initial.png", assignments)
+    assign_voronoi_targets(drones, pois, bounds)
+    draw_static(drones, pois, bounds, "voronoi_initial.png")
 
     fig, ax = plt.subplots(figsize=(16, 9))
     ax.set_xlim(0, bounds[0])
@@ -168,16 +260,19 @@ def simulate(bounds, num_steps=50, step_size=1.0, gif_filename="voronoi_simulati
     ax.set_autoscale_on(False)
 
     def update(frame):
-        for i, j in assignments:
-            if isinstance(drones[i], Quadcopter):
-                drones[i].move_towards(pois[j].position, step_size)
-        draw_scene(ax, drones, pois, bounds, assignments)
+        for drone in drones:
+            if isinstance(drone, Quadcopter):
+                # Always move towards the assigned target (region center if no POIs)
+                start = drone.target
+                if start is not None:
+                    drone.move_towards(start, step_size)
+        draw_scene(ax, drones, pois, bounds, show_voronoi=False, use_custom_voronoi=False)
 
     anim = FuncAnimation(fig, update, frames=num_steps, interval=200)
     anim.save(gif_filename, dpi=80, writer=PillowWriter(fps=5))
     plt.close()
 
-    draw_static(drones, pois, bounds, "voronoi_final.png", assignments)
+    draw_static(drones, pois, bounds, "voronoi_final.png")
 
 # --- Entry Point ---
 def main():
