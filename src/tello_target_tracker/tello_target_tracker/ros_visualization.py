@@ -108,8 +108,8 @@ class RosVisualizer:
                 self.node.get_logger().error(f"Error publishing control values: {str(e)}")
 
 
-def draw_tracking_status(frame, state, assigned_target_id, potential_target_id, 
-                         detection_count, min_detections, targets):
+def draw_tracking_status(frame, state, assigned_target_id, potential_targets, 
+                         min_detections, targets):
     """Draw tracking status information on the frame for debugging"""
     if frame is None:
         return None
@@ -140,10 +140,16 @@ def draw_tracking_status(frame, state, assigned_target_id, potential_target_id,
         2
     )
     
-    # Draw potential target and persistence
+    # Draw potential targets with persistence counts
+    potential_text = "Potentials: "
+    if potential_targets:  # Using the dictionary of potential targets
+        potential_text += ", ".join([f"{tid}:{count}" for tid, count in potential_targets.items()])
+    else:
+        potential_text += "None"
+        
     cv2.putText(
         vis_frame,
-        f"Potential: {potential_target_id}, Count: {detection_count}/{min_detections}",
+        potential_text,
         (10, 90),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.7,
@@ -159,8 +165,11 @@ def draw_tracking_status(frame, state, assigned_target_id, potential_target_id,
             # Use different colors for assigned, potential, and other targets
             if assigned_target_id == tid:
                 color = (0, 255, 0)  # Green for assigned target
-            elif potential_target_id == tid:
-                color = (0, 255, 255)  # Yellow for potential target
+            elif tid in potential_targets:
+                # Color intensity based on persistence count
+                count = potential_targets[tid]
+                intensity = min(255, 100 + (count * 50))  # Increases with count
+                color = (0, intensity, 255)  # Yellow/orange for potential targets
             else:
                 color = (255, 0, 0)  # Blue for other targets
                 
@@ -170,9 +179,13 @@ def draw_tracking_status(frame, state, assigned_target_id, potential_target_id,
             # Display ID and distance
             if 'distance' in target_info:
                 distance = target_info['distance']
+                persistence = ""
+                if tid in potential_targets:
+                    persistence = f" ({potential_targets[tid]}/{min_detections})"
+                    
                 cv2.putText(
                     vis_frame,
-                    f"ID:{tid} ({distance:.0f}cm)",
+                    f"ID:{tid}{persistence} ({distance:.0f}cm)",
                     (l, t-10),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.6,
@@ -180,9 +193,13 @@ def draw_tracking_status(frame, state, assigned_target_id, potential_target_id,
                     2
                 )
             else:
+                persistence = ""
+                if tid in potential_targets:
+                    persistence = f" ({potential_targets[tid]}/{min_detections})"
+                    
                 cv2.putText(
                     vis_frame,
-                    f"ID:{tid}",
+                    f"ID:{tid}{persistence}",
                     (l, t-10),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.6,

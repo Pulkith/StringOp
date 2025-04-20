@@ -2,156 +2,182 @@ import cv2
 import torch
 import numpy as np
 from ultralytics import YOLO
-from deep_sort_realtime.deepsort_tracker import DeepSort
+import random
+from typing import Dict, List, Tuple
 
-class PersonTracker:
+class PersonSegmentationTracker:
     def __init__(
         self,
-        model_name: str = "yolov8s.pt",
-        conf_thresh: float = 0.66,
-        device: str = None,
-        color_filter: bool = False,
-        brown_threshold: float = 0.50,
-        max_age: int = 500,
-        n_init: int = 5,
-        max_cosine_distance: float = 0.4,
-        nn_budget: int = 200,
-        embedder_model_name: str = "osnet_x0_25"
+        seg_model_name: str = "yolov8s-seg.pt",
+        conf_thresh: float = 0.8,
+        uniform_thresh: float = 0.4,
+        K: int = 3,
+        mask_padding: int = 10,
+        iou_thresh: float = 0.3,
+        device: str = None
     ):
-        # device setup
-        self.device = device or ("mps" if torch.backends.mps.is_available() else "cpu")
-        # load YOLO
-        self.model = YOLO(model_name).to(self.device)
+        # Device selection logic
+        self.device = device or (
+            "cuda" if torch.cuda.is_available() else (
+            "mps" if torch.backends.mps.is_available() else "cpu"))
+        print(f"Using device: {self.device}")
+
+        # Load and prepare segmentation model
+        self.seg_model = YOLO(seg_model_name).to(self.device)
+        # Eval mode for inference
+        self.seg_model.model.eval()
+        # Use half-precision on CUDA for better performance
+        if self.device == "cuda":
+            self.seg_model.model.half()
+
+        # Parameters
         self.conf_thresh = conf_thresh
+        self.uniform_thresh = uniform_thresh
+        self.K = K
+        self.mask_padding = mask_padding
+        self.iou_thresh = iou_thresh
 
-        # color filter params
-        self.color_filter = color_filter
-        self.brown_threshold = brown_threshold
-        self.lower_brown = np.array([10, 50, 20])
-        self.upper_brown = np.array([30, 255, 200])
+        # Tracking state
+        self.tracks: Dict[int, Tuple[int,int,int,int]] = {}
+        self.track_colors: Dict[int, Tuple[int,int,int]] = {}
+        self.next_id = 1
 
-        # tracker setup
-        self.tracker = DeepSort(
-            max_age=max_age,
-            n_init=n_init,
-            max_cosine_distance=max_cosine_distance,
-            nn_budget=nn_budget,
-            embedder_model_name=embedder_model_name,
-            half=True,
-            embedder_gpu=torch.cuda.is_available()
+    def _get_color(self) -> Tuple[int,int,int]:
+        """Generate a random color for visualization"""
+        return (random.randint(0,255), random.randint(0,255), random.randint(0,255))
+
+    def _iou(self, A: Tuple[int,int,int,int], B: Tuple[int,int,int,int]) -> float:
+        """Calculate Intersection over Union between two bounding boxes"""
+        xA = max(A[0], B[0]); yA = max(A[1], B[1])
+        xB = min(A[2], B[2]); yB = min(A[3], B[3])
+        interW = max(0, xB - xA); interH = max(0, yB - yA)
+        inter = interW * interH
+        areaA = (A[2]-A[0]) * (A[3]-A[1])
+        areaB = (B[2]-B[0]) * (B[3]-B[1])
+        denom = areaA + areaB - inter
+        return inter/denom if denom>0 else 0.0
+
+    def _dominant_hue(self, roi: np.ndarray, mask: np.ndarray=None) -> Tuple[int,float]:
+        """Find the dominant hue in the region of interest"""
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        h = hsv[...,0]
+        if mask is not None and mask.shape==h.shape and mask.any():
+            vals = h[mask>0].reshape(-1,1).astype(np.float32)
+        else:
+            vals = h.flatten().reshape(-1,1).astype(np.float32)
+        if vals.size==0:
+            return -1, 0.0
+        k = min(self.K, vals.shape[0])
+        __, labels, centers = cv2.kmeans(
+            vals, k, None,
+            (cv2.TERM_CRITERIA_EPS+cv2.TERM_CRITERIA_MAX_ITER,10,1.0),
+            3, cv2.KMEANS_PP_CENTERS
         )
+        counts = np.bincount(labels.flatten(), minlength=k)
+        idx = np.argmax(counts)
+        return int(centers[idx][0]), counts[idx]/vals.shape[0]
 
-    @staticmethod
-    def _is_wearing_brown(
-        roi_bgr: np.ndarray,
-        lower_brown: np.ndarray,
-        upper_brown: np.ndarray,
-        threshold: float
-    ) -> bool:
-        hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, lower_brown, upper_brown)
-        ratio = np.count_nonzero(mask) / (roi_bgr.shape[0] * roi_bgr.shape[1])
-        return ratio > threshold
-
-    def process_frame(self, frame: np.ndarray) -> list[dict]:
+    @torch.no_grad()
+    def process_frame(self, frame: np.ndarray) -> List[dict]:
         """
-        Detects & tracks people in a frame.
+        Process a frame to detect and track people using segmentation.
+        720*960 image size is expected.
         Returns a list of dicts: {"track_id": int, "bbox": (l, t, r, b)}
         """
-        # run detection
-        results = self.model.predict(frame, conf=self.conf_thresh, classes=[0], stream=False)
-        dets = []
-        for r in results:
-            for box, conf, cls in zip(r.boxes.xyxy, r.boxes.conf, r.boxes.cls):
-                if int(cls.item()) != 0:
+        H, W = frame.shape[:2]
+
+        # Resize frame for segmentation model
+        frame = frame[:,:,::-1]
+
+        # Run segmentation
+        res = self.seg_model.predict(frame, conf=self.conf_thresh, classes=[0], verbose=False)
+        
+        # Process segmentation results
+        matches = {}
+        if res and res[0].masks is not None:
+            masks = res[0].masks.xy
+            
+            # Build detections from segmentation masks
+            dets = []
+            for poly in masks:
+                cnt = np.array(poly, np.int32)
+                if cnt.shape[0] < 3: 
                     continue
-                x1, y1, x2, y2 = map(int, box.tolist())
-                
-                # Ensure coordinates are properly ordered
-                if x2 < x1:
-                    x1, x2 = x2, x1
-                if y2 < y1:
-                    y1, y2 = y2, y1
-                
-                # Get original frame dimensions
-                orig_h, orig_w = frame.shape[:2]
-                # Get YOLO processing dimensions (from the log: 480x640)
-                yolo_h, yolo_w = 480, 640
-
-                # Scale factors
-                scale_x = orig_w / yolo_w
-                scale_y = orig_h / yolo_h
-
-                # Scale the coordinates back to original resolution
-                x1 = int(x1 * scale_x)
-                y1 = int(y1 * scale_y)
-                x2 = int(x2 * scale_x)
-                y2 = int(y2 * scale_y)
-
-                # Now use the properly ordered coordinates
+                x, y, w, h = cv2.boundingRect(cnt)
+                # Add padding to the bounding box
+                x1 = max(x-self.mask_padding, 0)
+                y1 = max(y-self.mask_padding, 0)
+                x2 = min(x+w+self.mask_padding, W)
+                y2 = min(y+h+self.mask_padding, H)
+                dets.append({'cnt': cnt, 'bbox': (x1, y1, x2, y2)})
+            
+            # Track by IoU
+            new_tracks = {}
+            det_map = {}
+            used = set()
+            for det in dets:
+                best, biou = None, self.iou_thresh
+                for tid, old in self.tracks.items():
+                    if tid in used: 
+                        continue
+                    iou = self._iou(old, det['bbox'])
+                    if iou > biou: 
+                        best, biou = tid, iou
+                if best is None:
+                    best = self.next_id
+                    self.next_id += 1
+                    self.track_colors[best] = self._get_color()
+                new_tracks[best] = det['bbox']
+                det_map[best] = det
+                used.add(best)
+            self.tracks = new_tracks
+            
+            # Filter by hue uniformity
+            for tid, det in det_map.items():
+                x1, y1, x2, y2 = det['bbox']
+                # Build mask
+                mask = np.zeros((H, W), np.uint8)
+                cv2.drawContours(mask, [det['cnt']], -1, 255, -1)
                 roi = frame[y1:y2, x1:x2]
-                if roi.size == 0:
-                    continue
-                if self.color_filter and not self._is_wearing_brown(
-                    roi, self.lower_brown, self.upper_brown, self.brown_threshold
-                ):
-                    continue
-                dets.append(((x1, y1, x2, y2), float(conf.item()), "person"))
-
-        # update tracker
-        tracks = self.tracker.update_tracks(dets, frame=frame)
+                crop_mask = mask[y1:y2, x1:x2]
+                hue, ratio = self._dominant_hue(roi, mask=crop_mask)
+                if hue >= 0 and ratio >= self.uniform_thresh:
+                    matches[tid] = det['bbox']
+        
+        # Convert matches to the format expected by the state machine
         output = []
-        for tr in tracks:
-            if not tr.is_confirmed():
-                continue
-            tid = tr.track_id
-            l, t, r, b = map(int, tr.to_ltrb())
+        for tid, (l, t, r, b) in matches.items():
             output.append({"track_id": tid, "bbox": (l, t, r, b)})
+        
         return output
-
+    
     def draw_tracks(
         self,
         frame: np.ndarray,
-        tracks: list[dict],
-        box_color: tuple[int, int, int] = (0, 255, 0),
-        text_color: tuple[int, int, int] = (0, 255, 0)
+        tracks: List[dict],
+        box_color: Tuple[int, int, int] = None,
+        text_color: Tuple[int, int, int] = None
     ) -> np.ndarray:
+        """Draw tracking results on the frame"""
+        result = frame.copy()
         for tr in tracks:
-            l, t, r, b = tr["bbox"]
             tid = tr["track_id"]
-            cv2.rectangle(frame, (l, t), (r, b), box_color, 2)
+            l, t, r, b = tr["bbox"]
+            
+            # Use track-specific color if no color is provided
+            color = box_color or self.track_colors.get(tid, (0, 255, 0))
+            txt_color = text_color or color
+            
+            # Draw bounding box
+            cv2.rectangle(result, (l, t), (r, b), color, 2)
+            # Draw ID
             cv2.putText(
-                frame,
+                result,
                 f"ID {tid}",
                 (l, t - 10),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.6,
-                text_color,
+                txt_color,
                 2
             )
-        return frame
-
-    def run_webcam(self, source: int = 0):
-        cap = cv2.VideoCapture(source)
-        if not cap.isOpened():
-            raise IOError("Cannot open webcam")
-
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            tracks = self.process_frame(frame)
-            annotated = self.draw_tracks(frame, tracks)
-            cv2.imshow("Person Tracker", annotated)
-
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                break
-
-        cap.release()
-        cv2.destroyAllWindows()
-
-
-if __name__ == "__main__":
-    tracker = PersonTracker(color_filter=False)
-    tracker.run_webcam()
+        return result
