@@ -1131,3 +1131,6 @@ class BackgroundFrameRead:
         Internal method, you normally wouldn't call this yourself.
         """
         self.stopped = True
+
+
+

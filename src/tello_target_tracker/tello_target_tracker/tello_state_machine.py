@@ -109,6 +109,8 @@ class TelloStateMachine(Node):
         self.status_timer = self.create_timer(1.0, self.publish_status)  # 1Hz
         
         self.get_logger().info(f'Tello State Machine initialized for drone {self.drone_id}')
+        # set logger to debug
+        self.get_logger().set_level(rclpy.logging.LoggingSeverity.DEBUG)
     
     def connect_to_drone(self):
         """Connect to the Tello drone and initialize it with retry logic"""
@@ -125,7 +127,7 @@ class TelloStateMachine(Node):
                     self.get_logger().warn(f"Low battery: {battery}%! Charge before extended flight.")
                 
                 # Initialize camera after successful connection
-                self.tello_camera = TelloCamera(self.tello)
+                self.tello_camera = TelloCamera(self.tello, self.get_logger())
                 
                 return True
             except Exception as e:

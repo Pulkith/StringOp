@@ -14,26 +14,28 @@ def run(bounds=(160, 90), num_steps=200, seed=1):
     random.seed(seed)
 
     # Create results directory
-    results_dir = "results/basic_sim"
+    results_dir = "results/weights_sim"
     os.makedirs(results_dir, exist_ok=True)
 
     # Define the values of the simulation
     num_drones = 3
     num_fw = 0
-    num_pois = 4
+    num_pois = 10
+
+    poi_range = (1, 10)
 
     # Initialize drones, POIs, and AOIs
     def random_point():
         return (random.uniform(0, bounds[0]), random.uniform(0, bounds[1]))
     drones = [Quadcopter(random_point()) for _ in range(num_drones)]
-    pois = [PointOfInterest(random_point(), weight=8) for _ in range(num_pois)]
+    pois = [PointOfInterest(random_point(), weight=random.uniform(*poi_range)) for _ in range(num_pois)]
     aois = []
 
     # Draw initial configuration
     draw_static(drones, pois, aois, bounds, os.path.join(results_dir, "initial.png"))
 
     # Set up the figure for animation
-    animate_simulation(drones, pois, aois, bounds,results_dir,  num_steps=num_steps, seed=seed)
+    animate_simulation(drones, pois, aois, bounds, results_dir, num_steps=num_steps, seed=seed)
 
     # Draw final configuration
     draw_static(drones, pois, aois, bounds, os.path.join(results_dir, "final.png"))

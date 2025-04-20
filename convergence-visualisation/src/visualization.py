@@ -5,6 +5,23 @@ from matplotlib.patches import Polygon as MplPolygon
 from matplotlib import cm
 from matplotlib.colors import Normalize
 from src.entities import *
+import random
+import os, io
+import numpy as np
+
+from scipy.spatial import Voronoi
+from src.voronoi_utils import clipped_voronoi_polygons_2d
+from src.planner import assign_voronoi_targets
+from shapely.geometry import Point
+from matplotlib.animation import FuncAnimation, PillowWriter, FFMpegWriter
+from matplotlib.collections import PatchCollection
+from matplotlib.patches import Polygon as MplPolygon
+from matplotlib import cm
+from matplotlib.colors import Normalize
+from shapely.geometry import LineString
+from src.entities import Quadcopter, PointOfInterest, AreaOfInterest
+from src.voronoi_utils import clipped_voronoi_polygons_2d
+from src.planner import assign_voronoi_targets
 
 # --- helper functions ---
 
@@ -120,15 +137,20 @@ def draw_scene(ax, drones, pois, aois, bounds,
 
 
 # --- Drawing Utilities ---
-def draw_static(drones, pois, aois, bounds, filename, assignments=None):
+def draw_static(drones, pois, aois, bounds, filename, assignments=None, streamlit_display=False):
     fig, ax = plt.subplots(figsize=(16, 9))
     ax.set_xlim(0, bounds[0])
     ax.set_ylim(0, bounds[1])
     draw_scene(ax, drones, pois, aois, bounds, assignments, show_voronoi=True, use_custom_voronoi=False)
     ax.set_title("Initial Configuration of Drones and POIs")
     plt.tight_layout()
-    plt.savefig(filename, dpi=300)
-    plt.close()
+    
+    if streamlit_display:
+        import streamlit as st
+        st.pyplot(fig)
+    else:
+        plt.savefig(filename, dpi=300)
+        plt.close()
 
 def draw_priority_surface(drones, pois, aois, bounds, filename, grid_res=100, sigma=None):
     """
@@ -211,13 +233,12 @@ def draw_priority_surface(drones, pois, aois, bounds, filename, grid_res=100, si
 # --- Animation ---
 from matplotlib.animation import FuncAnimation, PillowWriter
 
-def animate_simulation(drones, pois, aois, bounds, num_steps=50, seed=1):
+def animate_simulation(drones, pois, aois, bounds, results_dir, num_steps=200, seed=1, streamlit_display=False):
     # Set random seed for reproducibility
     np.random.seed(seed)
     random.seed(seed)
 
     # Create results directory
-    results_dir = "results/basic_sim"
     os.makedirs(results_dir, exist_ok=True)
 
     # Set up the figure for animation
@@ -228,6 +249,12 @@ def animate_simulation(drones, pois, aois, bounds, num_steps=50, seed=1):
     ax.set_autoscale_on(False)
 
     def update(frame):
+        # Check for drone 'deaths'
+        for drone in drones:
+            if drone.alive and random.random() < drone.death_prob and len([d for d in drones if d.alive]) > 3:
+                drone.alive = False
+
+        
         # Assign Voronoi targets
         points = np.array([drone.position for drone in drones if drone.alive])
         if len(points) > 0:  # Ensure there are points to create a Voronoi diagram
@@ -245,8 +272,13 @@ def animate_simulation(drones, pois, aois, bounds, num_steps=50, seed=1):
 
     # Create the animation
     anim = FuncAnimation(fig, update, frames=num_steps, interval=200)
-
     # Save the animation as a GIF
     gif_path = os.path.join(results_dir, "simulation.gif")
     anim.save(gif_path, dpi=80, writer=PillowWriter(fps=5))
     plt.close()
+
+    if streamlit_display:
+        # show the GIF in Streamlit
+        import streamlit as st
+        st.image(gif_path, caption="Simulation Animation")
+        
