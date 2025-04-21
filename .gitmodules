@@ -1,3 +1,6 @@
 [submodule "DJITelloPy"]
 	path = src/DJITelloPy
 	url = git@github.com:damiafuentes/DJITelloPy.git
+[submodule "OC_SORT"]
+	path = OC_SORT
+	url = https://github.com/noahcao/OC_SORT/tree/master
