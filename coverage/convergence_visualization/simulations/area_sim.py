@@ -29,7 +29,6 @@ def run(bounds=(160, 90), num_steps=200, seed=1):
     poi_range = (1, 10)
     aoi_range = (1, 5)
 
-
     # Initialize drones, POIs, and AOIs
     def random_point():
         return (random.uniform(0, bounds[0]), random.uniform(0, bounds[1]))

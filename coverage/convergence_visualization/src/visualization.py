@@ -4,14 +4,26 @@ from matplotlib.collections import PatchCollection
 from matplotlib.patches import Polygon as MplPolygon
 from matplotlib import cm
 from matplotlib.colors import Normalize
-from convergence_visualization.src.entities import *
+try:
+    from convergence_visualization.src.entities import *
+    from convergence_visualization.src.voronoi_utils import clipped_voronoi_polygons_2d
+    from convergence_visualization.src.planner import assign_voronoi_targets
+    from convergence_visualization.src.entities import Quadcopter, PointOfInterest, AreaOfInterest
+    from convergence_visualization.src.voronoi_utils import clipped_voronoi_polygons_2d
+    from convergence_visualization.src.planner import assign_voronoi_targets
+except ImportError:
+    from src.entities import *
+    from src.voronoi_utils import clipped_voronoi_polygons_2d
+    from src.planner import assign_voronoi_targets
+    from src.entities import Quadcopter, PointOfInterest, AreaOfInterest
+    from src.voronoi_utils import clipped_voronoi_polygons_2d
+    from src.planner import assign_voronoi_targets
+
 import random
 import os, io
 import numpy as np
 
 from scipy.spatial import Voronoi
-from convergence_visualization.src.voronoi_utils import clipped_voronoi_polygons_2d
-from convergence_visualization.src.planner import assign_voronoi_targets
 from shapely.geometry import Point
 from matplotlib.animation import FuncAnimation, PillowWriter, FFMpegWriter
 from matplotlib.collections import PatchCollection
@@ -19,9 +31,6 @@ from matplotlib.patches import Polygon as MplPolygon
 from matplotlib import cm
 from matplotlib.colors import Normalize
 from shapely.geometry import LineString
-from convergence_visualization.src.entities import Quadcopter, PointOfInterest, AreaOfInterest
-from convergence_visualization.src.voronoi_utils import clipped_voronoi_polygons_2d
-from convergence_visualization.src.planner import assign_voronoi_targets
 
 # --- helper functions ---
 
@@ -30,13 +39,39 @@ def create_rectangle_marker(bounds):
     y = [0, bounds[1], bounds[1], 0, 0]
     return x, y
 
+def create_legend(ax):
+    """
+    Create a consistent legend for both static and dynamic visualizations.
+    """
+    drone_handle = mlines.Line2D([], [], color='black', marker='x', linestyle='None', markersize=8, label='Quadcopter')
+    poi_handle = mlines.Line2D([], [], color='red', marker='o', linestyle='None', markersize=6, label='POI')
+    target_handle = mlines.Line2D([], [], color='green', marker='*', linestyle='None', markersize=10, label='Target')
+    goal_line_handle = mlines.Line2D([], [], color='blue', linewidth=1.5, label='Goal Line')
+    link_line_handle = mlines.Line2D([], [], color='gray', linestyle='--', linewidth=1, label='POI Links')
+    area_handle = mlines.Line2D([], [], color='magenta', linestyle='--', linewidth=1, label='Area of Interest')
+    skull_handle = mlines.Line2D([], [], color='none', marker='$\u2620$', linestyle='None', markersize=12, label='Dead Drone')
+
+    ax.legend(
+        handles=[
+            drone_handle,
+            poi_handle,
+            target_handle,
+            area_handle,
+            goal_line_handle,
+            link_line_handle,
+            skull_handle
+        ],
+        loc='upper right'
+    )
 
 
 # --- Visualization ---
 def draw_scene(ax, drones, pois, aois, bounds,
                assignments=None,
                show_voronoi=False,
-               use_custom_voronoi=False):
+               use_custom_voronoi=False, 
+                voronoi_regions=None,
+                background_image=None):
     ax.cla()
     ax.set_xlabel("X (meters)")
     ax.set_ylabel("Y (meters)")
@@ -46,6 +81,10 @@ def draw_scene(ax, drones, pois, aois, bounds,
     ax.set_aspect('equal')
     ax.set_autoscale_on(False)
     ax.plot(*create_rectangle_marker(bounds), color='black', linewidth=2)
+
+    # Draw the background image if provided
+    if background_image is not None:
+        ax.imshow(background_image, extent=(0, bounds[0], 0, bounds[1]), aspect='auto', zorder=-2, alpha=0.5)
 
     # colormap for POI priority (weight)
     norm_poi = Normalize(vmin=1, vmax=10)
@@ -110,34 +149,11 @@ def draw_scene(ax, drones, pois, aois, bounds,
         color = cmap_poi(norm_poi(poi.weight))
         ax.scatter(*poi.position, color=color, s=40)
 
-    # Legend (applies to both static and animation)
-    drone_handle      = mlines.Line2D([], [], color='black', marker='x', linestyle='None', markersize=8, label='Quadcopter')
-    poi_handle        = mlines.Line2D([], [], color='red',   marker='o', linestyle='None', markersize=6, label='POI')
-    target_handle     = mlines.Line2D([], [], color='green', marker='*', linestyle='None', markersize=10, label='Target')
-    # center_handle     = mlines.Line2D([], [], color='orange',marker='o', linestyle='None', markersize=8, label='Region Center', alpha=0.5)
-    goal_line_handle  = mlines.Line2D([], [], color='blue',  linewidth=1.5,           label='Goal Line')
-    link_line_handle  = mlines.Line2D([], [], color='gray',  linestyle='--', linewidth=1, label='POI Links')
-    area_handle      = mlines.Line2D([], [], color='magenta', linestyle='--', linewidth=1, label='Area of Interest')
-    skull_handle = mlines.Line2D([], [], color='none', marker='$\u2620$',linestyle='None',markersize=12,label='Dead Drone')
-    ax.legend(
-        handles=[
-            drone_handle,
-            poi_handle,
-            target_handle,
-            area_handle,
-            # center_handle,
-            goal_line_handle,
-            link_line_handle,
-            skull_handle
-        ],
-        loc='upper right'
-    )
-
     ax.set_title("Drones Moving to POI Region Centers")
 
 
 # --- Drawing Utilities ---
-def draw_static(drones, pois, aois, bounds, filename=None, assignments=None, streamlit_display=False):
+def draw_static(drones, pois, aois, bounds, filename=None, assignments=None, streamlit_display=False, background_image=None):
     """
     Draw the static configuration of drones, POIs, and AOIs.
     """
@@ -146,36 +162,29 @@ def draw_static(drones, pois, aois, bounds, filename=None, assignments=None, str
     ax.set_ylim(0, bounds[1])
     ax.set_aspect('equal')
 
-    # Draw drones
-    for drone in drones:
-        color = 'green' if drone.alive else 'gray'
-        ax.scatter(*drone.position, color=color, s=50, label='Drone' if 'Drone' not in ax.get_legend_handles_labels()[1] else "")
+    draw_scene(ax, drones, pois, aois, bounds,
+              show_voronoi=True,
+              use_custom_voronoi=False,
+              background_image=background_image)
 
-    # Draw POIs
+    # Add arrows for moving POIs
     for poi in pois:
-        ax.scatter(*poi.position, color='red', s=50, label='POI' if 'POI' not in ax.get_legend_handles_labels()[1] else "")
-        
-        # Draw direction arrow and annotate speed for moving POIs
         if poi.moving:
             arrow_length = 5.0 * poi.speed  # Arrow length proportional to speed
             dx = arrow_length * np.cos(poi.direction)
             dy = arrow_length * np.sin(poi.direction)
             ax.arrow(
                 poi.position[0], poi.position[1], dx, dy,
-                head_width=2.0, head_length=2.0, fc='blue', ec='blue'
+                head_width=2.0, head_length=2.0, fc='blue', ec='blue', zorder=3
             )
             # Annotate speed near the arrow
             ax.text(
                 poi.position[0] + dx / 2, poi.position[1] + dy / 2,
-                f"{poi.speed:.1f}", color='blue', fontsize=8, ha='center'
+                f"{poi.speed:.1f}", color='blue', fontsize=8, ha='center', zorder=3
             )
 
-    # Draw AOIs
-    for aoi in aois:
-        polygon = MplPolygon(aoi["coords"], closed=True, edgecolor='magenta', fill=False, linewidth=2)
-        ax.add_patch(polygon)
-
     ax.set_title("Static Configuration of Drones, POIs, and AOIs")
+    create_legend(ax)
     plt.tight_layout()
 
     if streamlit_display:
@@ -185,10 +194,10 @@ def draw_static(drones, pois, aois, bounds, filename=None, assignments=None, str
         plt.savefig(filename, dpi=300)
         plt.close()
 
-def draw_priority_surface(drones, pois, aois, bounds, filename, grid_res=100, sigma=None):
+def draw_priority_surface(drones, pois, aois, bounds, filename, grid_res=100, sigma=None, animate_rotation=False):
     """
     Draw a 3D surface of POI priority weights as Gaussian blobs,
-    overlaid on the 2D map at z=0.
+    overlaid on the 2D map at z=0. Optionally animate the rotation.
     """
     if sigma is None:
         sigma = min(bounds) / 10.0
@@ -205,7 +214,7 @@ def draw_priority_surface(drones, pois, aois, bounds, filename, grid_res=100, si
         w = poi.weight
         Z += w * np.exp(-((X - xi) ** 2 + (Y - yi) ** 2) / (2 * sigma ** 2))
 
-    # include area contributions via their centroids
+    # Include area contributions via their centroids
     for area in aois:
         xi, yi = area.polygon.centroid.coords[0]
         w = area.weight
@@ -215,16 +224,11 @@ def draw_priority_surface(drones, pois, aois, bounds, filename, grid_res=100, si
     fig = plt.figure(figsize=(16, 9))
     ax = fig.add_subplot(111, projection='3d')
 
-    # Draw 2D map underneath at z=0
-    # map border
-    rect_x, rect_y = create_rectangle_marker(bounds)
-    ax.plot(rect_x, rect_y, zs=0, zdir='z', color='black', linewidth=2)
-
     # Voronoi regions
     for drone in drones:
         if drone.region_polygon is not None:
             coords = np.array(drone.region_polygon.exterior.coords)
-            ax.plot(coords[:,0], coords[:,1], zs=0, zdir='z',
+            ax.plot(coords[:, 0], coords[:, 1], zs=0, zdir='z',
                     color='blue', alpha=0.3)
 
     # Drones as black 'x'
@@ -240,10 +244,10 @@ def draw_priority_surface(drones, pois, aois, bounds, filename, grid_res=100, si
         ax.scatter(poi.position[0], poi.position[1], 0,
                    color=color, s=30)
 
-    # draw areas of interest outlines
+    # Draw areas of interest outlines
     for area in aois:
         coords = np.array(area.polygon.exterior.coords)
-        ax.plot(coords[:,0], coords[:,1], color='magenta', linestyle='--', linewidth=1)
+        ax.plot(coords[:, 0], coords[:, 1], color='magenta', linestyle='--', linewidth=1)
 
     # Plot the 3D surface
     surf = ax.plot_surface(X, Y, Z,
@@ -253,20 +257,28 @@ def draw_priority_surface(drones, pois, aois, bounds, filename, grid_res=100, si
     ax.set_xlabel("X (meters)")
     ax.set_ylabel("Y (meters)")
     ax.set_zlabel("Priority Intensity")
-    ax.set_box_aspect((1,1,(0.5)))  # X=Y, Z other ration
+    ax.set_box_aspect((1, 1, 0.5))  # X=Y, Z=0.5 ratio
     fig.colorbar(surf, ax=ax, shrink=0.5, aspect=10, label="Weighted Intensity")
 
-    plt.tight_layout()
-    plt.savefig(filename, dpi=300)
-    # plt.show()
-    plt.close()
+    # Rotate the 3D plot if animation is enabled
+    if animate_rotation:
+        def update(frame):
+            ax.view_init(elev=30, azim=frame)
 
+        # Create the animation
+        anim = FuncAnimation(fig, update, frames=np.arange(0, 360, 2), interval=50)
+        anim.save(filename.replace(".png", ".gif"), dpi=80, writer=PillowWriter(fps=20))
+        plt.close()
+    else:
+        plt.tight_layout()
+        plt.savefig(filename, dpi=300)
+        plt.close()
 
 
 # --- Animation ---
 from matplotlib.animation import FuncAnimation, PillowWriter
 
-def animate_simulation(drones, pois, aois, bounds, results_dir, num_steps=200, seed=1, streamlit_display=False):
+def animate_simulation(drones, pois, aois, bounds, results_dir, num_steps=200, seed=1, streamlit_display=False, background_image=None):
     # Set random seed for reproducibility
     np.random.seed(seed)
     random.seed(seed)
@@ -280,6 +292,9 @@ def animate_simulation(drones, pois, aois, bounds, results_dir, num_steps=200, s
     ax.set_ylim(0, bounds[1])
     ax.set_aspect('equal')
     ax.set_autoscale_on(False)
+
+    # Add legend
+    create_legend(ax)
 
     def update(frame):
         # Move POIs
@@ -304,13 +319,17 @@ def animate_simulation(drones, pois, aois, bounds, results_dir, num_steps=200, s
                 drone.move_towards(drone.target, step_size=1.0)
 
         # Redraw the scene
-        draw_scene(ax, drones, pois, aois, bounds)
+        draw_scene(ax, drones, pois, aois, bounds, background_image=background_image)
 
     # Create the animation
     anim = FuncAnimation(fig, update, frames=num_steps, interval=200)
+    
+    # Add legend
+    create_legend(ax)
+    
     # Save the animation as a GIF
     gif_path = os.path.join(results_dir, "simulation.gif")
-    anim.save(gif_path, dpi=80, writer=PillowWriter(fps=5))
+    anim.save(gif_path, dpi=80, writer=PillowWriter(fps=15))
     plt.close()
 
     if streamlit_display:

@@ -10,7 +10,7 @@ class Drone:
         self.center_point = None
         self.targets_in_region = []
         self.alive = True
-        self.death_prob = 0.01
+        self.death_prob = 0.001
 
     def set_death_prob(self, prob):
         self.death_prob = prob
@@ -34,13 +34,17 @@ class FixedWing(Drone):
         self.heading = heading
 
 class PointOfInterest:
-    def __init__(self, position, weight=1.0, moving=False, speed=1.0):
+    def __init__(self, position, weight=1.0, moving=False, speed=1.0, direction=None):
         self.position = np.array(position)
         self.id = str(uuid.uuid4())
         self.weight = weight
         self.moving = moving  # Whether the POI is moving
         self.speed = speed  # Speed of movement
-        self.direction = np.random.uniform(0, 2 * np.pi)  # Random initial direction
+        
+        if direction is not None:
+            self.direction = direction
+        else:
+            self.direction = np.random.uniform(0, 2 * np.pi)  # Random initial direction
 
     def move(self, bounds):
         if self.moving:

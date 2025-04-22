@@ -3,11 +3,18 @@ from scipy.spatial import Voronoi
 import os
 import numpy as np
 import random
-from convergence_visualization.src.entities import Quadcopter, PointOfInterest, AreaOfInterest
-from convergence_visualization.src.voronoi_utils import clipped_voronoi_polygons_2d
-from convergence_visualization.src.planner import assign_voronoi_targets
-from convergence_visualization.src.visualization import *
+try:
+    from convergence_visualization.src.entities import Quadcopter, PointOfInterest, AreaOfInterest
+    from convergence_visualization.src.voronoi_utils import clipped_voronoi_polygons_2d
+    from convergence_visualization.src.planner import assign_voronoi_targets
+    from convergence_visualization.src.visualization import *
+except ImportError:
+    from src.entities import Quadcopter, PointOfInterest, AreaOfInterest
+    from src.voronoi_utils import clipped_voronoi_polygons_2d
+    from src.planner import assign_voronoi_targets
+    from src.visualization import *
 
+    
 def run(bounds=(160, 90), num_steps=200, seed=1, drone_positions=None, poi_positions=None):
     drones = [Quadcopter(pos) for pos in drone_positions]
     pois = [PointOfInterest(position=pos, weight=1.0) for pos in poi_positions]
