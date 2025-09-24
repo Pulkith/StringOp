@@ -1,4 +1,4 @@
-# hackathon_sf
+# StingOp
 
 
 # download the docker
